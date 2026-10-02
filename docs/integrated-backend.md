@@ -38,7 +38,7 @@
 
 `npm run test:backend` 使用合成数据库验证分库、分页、发送者、长文本、搜索、只读查询、导出，以及加密准备和失败恢复。加密测试使用独立 AES/HMAC 编码生成的配置样本，不代表已完成真实微信版本兼容性验证。
 
-`npm run check:desktop` 启动隐藏 Electron 窗口，验证实际 IPC、数据库 Worker 和 TXT / HTML / CSV / JSON 导出。
+`npm run check:desktop` 启动隐藏 Electron 窗口，检查准备页实际渲染，验证实际 IPC、数据库 Worker 和 TXT / HTML / CSV / JSON 导出。
 打包后可运行 `npm run check:desktop -- --packaged`，从安装包的 `app.asar` 加载应用并使用包内独立后端，关闭源码 Python 路径，检查安装包资源接入。
 
 发布前仍需在目标 Windows / 微信版本上走一次真实账号准备与导出流程。不要根据合成测试宣称所有微信版本、媒体附件和上游高级功能均已通过验证。

@@ -20,12 +20,21 @@ const deadline = setTimeout(() => { console.error('DESKTOP CHECK TIMEOUT'); app.
 app.on('browser-window-created', (_, win) => {
   win.setSkipTaskbar(true);
   win.on('show', () => win.hide());
+  win.webContents.on('console-message', (details) => {
+    if (details.level === 'error') console.error('RENDERER ERROR', details.message);
+  });
   win.webContents.on('did-finish-load', async () => {
     if (checked || !win.webContents.getURL().includes('index.html')) return;
     checked = true;
     try {
       await win.webContents.executeJavaScript(`location.hash = '/onboarding-window'`);
-      await new Promise(resolve => setTimeout(resolve, 1200));
+      let setupReady = false;
+      for (let attempt = 0; attempt < 40; attempt++) {
+        setupReady = await win.webContents.executeJavaScript(`Boolean(document.querySelector('.integrated-setup .setup-primary'))`);
+        if (setupReady) break;
+        await new Promise(resolve => setTimeout(resolve, 250));
+      }
+      assert.equal(setupReady, true, 'The preparation page must render before checking IPC.');
       fs.writeFileSync(path.join(config.home, 'setup.png'), (await win.webContents.capturePage()).toPNG());
       const result = await win.webContents.executeJavaScript(`(async () => {
         const api = window.electronAPI;
