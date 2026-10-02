@@ -96,10 +96,12 @@ def snapshot(root: Path, work_root: Path, ensure_stopped: Callable[[], None],
             if hasher.hexdigest() != initial[name][2]:
                 raise ToolError("SOURCE_CHANGED", "复制期间数据库内容发生变化。", "退出微信后重新运行。")
             if name in files:
-                item = {"file": name, "size": initial[name][0], "sha256": initial[name][2]}
+                item = {"file": name, "size": initial[name][0], "mtime_ns": initial[name][1],
+                        "sha256": initial[name][2]}
                 wal = name + "-wal"
                 if wal in initial:
-                    item["wal"] = {"file": wal, "size": initial[wal][0], "sha256": initial[wal][2]}
+                    item["wal"] = {"file": wal, "size": initial[wal][0], "mtime_ns": initial[wal][1],
+                                   "sha256": initial[wal][2]}
                 manifest.append(item)
         ensure_stopped()
         if not explicit_files and files != inventory(root, messages):

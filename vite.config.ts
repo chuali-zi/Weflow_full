@@ -260,7 +260,7 @@ export default defineConfig({
         }
       },
       {
-        entry: 'electron/localWcdbWorker.ts',
+        entry: 'electron/wcdbWorker.ts',
         onstart: handleElectronOnStart,
         vite: {
           build: {
@@ -273,6 +273,26 @@ export default defineConfig({
               ],
               output: {
                 entryFileNames: 'wcdbWorker.js',
+                codeSplitting: false
+              }
+            }
+          }
+        }
+      },
+      {
+        entry: 'electron/localWcdbWorker.ts',
+        onstart: handleElectronOnStart,
+        vite: {
+          build: {
+            outDir: 'dist-electron',
+            rollupOptions: {
+              external: [
+                'better-sqlite3',
+                'koffi',
+                'fsevents'
+              ],
+              output: {
+                entryFileNames: 'localWcdbWorker.js',
                 codeSplitting: false
               }
             }

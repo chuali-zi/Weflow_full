@@ -7,11 +7,15 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 
-from weflow_backend.backend import Backend
+from weflow_backend.backend import Backend, account_root
 from wxtext.errors import ToolError
 from wxtext.state import StateStore
-from fixtures import FakeWindows, make_account, install_snapshot, encrypted_account
+from wxtext.windows import parse_config_paths
+from fixtures import FakeWindows, make_account, install_snapshot, encrypted_account, encrypt_fixture
+from wxtext.adapter import message_table
+from wxtext.cipher import decrypt_database
 
 
 class QueryTests(unittest.TestCase):
@@ -82,6 +86,15 @@ class QueryTests(unittest.TestCase):
         self.assertEqual(len(rows), 3)
         self.assertEqual(rows[0]['message_content'], self.text)
         self.assertEqual(result['rawExportManifests']['wxid_peer']['rows'], 3)
+        session_db = self.root / 'session/session.db'
+        session_db.parent.mkdir(parents=True)
+        session_db.write_bytes(b'synthetic session database path')
+        fallback = self.backend.exportRaw({'account': {'sessionDb': str(session_db)},
+            'outputDir': str(self.home / 'exports-from-session-path'), 'sessionIds': ['wxid_peer']})
+        self.assertEqual(fallback['successCount'], 1)
+        with self.assertRaises(ToolError) as caught:
+            self.backend.exportRaw({'account': {}, 'outputDir': str(self.home / 'missing-account'), 'sessionIds': []})
+        self.assertEqual(caught.exception.code, 'ACCOUNT_REQUIRED')
         with self.assertRaises(ToolError):
             self.backend.exportRaw({'account': {'accountDir': str(self.root.parent)}, 'outputDir': str(self.root / 'export'), 'sessionIds': []})
 
@@ -96,6 +109,18 @@ class QueryTests(unittest.TestCase):
         self.assertEqual(replies[1]['result']['count'], 5)
         self.assertEqual(replies[2]['result']['code'], 'FEATURE_UNAVAILABLE')
         self.assertEqual(result.stderr, '')
+
+    def test_wechat_ini_accepts_bare_path_and_key_value(self):
+        bare = parse_config_paths(b'D:\\wechat\r\n')
+        keyed = parse_config_paths('DataDir=D:\\wechat\r\n'.encode('utf-16'))
+        self.assertEqual([str(path) for path in bare], ['D:\\wechat'])
+        self.assertEqual([str(path) for path in keyed], ['D:\\wechat'])
+
+    def test_account_root_without_argument_uses_records(self):
+        with patch('weflow_backend.backend.discover_data_dir_records',
+                   return_value=[{'dataDir': self.root}]) as discover:
+            self.assertEqual(account_root(), self.root.resolve())
+        discover.assert_called_once_with()
 
 
 @unittest.skipUnless(os.name == 'nt', 'Windows native SQLite fixture')
@@ -114,7 +139,8 @@ class PreparationTests(unittest.TestCase):
     def test_encrypted_preparation_dpapi_reopen_and_source_preserved(self):
         before = {p: p.read_bytes() for p in self.root.rglob('*.db')}
         first = self.backend.prepareKeys(str(self.root))
-        self.assertEqual(first['verifiedDatabases'], 3)
+        self.assertEqual(first['verifiedDatabases'], 4)
+        self.assertEqual(len(self.windows.last_required), 4)
         self.backend.prepareKeys(str(self.root))
         self.assertEqual(self.windows.acquisitions, 1)
         sealed = self.backend.state.cache_path(self.root).read_bytes()
@@ -123,13 +149,23 @@ class PreparationTests(unittest.TestCase):
         with self.assertRaisesRegex(ToolError, 'NEED_EXIT'):
             self.backend.createSnapshot(str(self.root))
         self.windows.running = False
-        result = self.backend.createSnapshot(str(self.root))
-        self.assertTrue(Path(result['directory']).is_dir())
+        result = self.backend.testConnection(str(self.root.parent))
+        self.assertTrue(result['success'])
+        self.assertTrue(Path(self.backend.read_active(self.root)['directory']).is_dir())
         self.backend.open(str(self.root.parent))
         self.assertEqual(len(list(self.backend.message_stream('wxid_peer'))), 5)
         self.assertEqual(self.backend.snapshotConfig(str(self.root))['accountId'], 'wxid_me')
         self.assertEqual(before, {p: p.read_bytes() for p in self.root.rglob('*.db')})
         self.assertEqual(list(self.backend.state.work_root().iterdir()), [])
+
+        # A valid core cache must still trigger one bounded pass to recover
+        # optional WeFlow databases missing from the cache.
+        cached = self.backend.state.load_keys(self.root)
+        cached.pop('media/media_0.db')
+        self.backend.state.save_keys(self.root, cached, {'synthetic': True})
+        repaired = self.backend.prepareKeys(str(self.root))
+        self.assertEqual(repaired['verifiedDatabases'], 4)
+        self.assertEqual(self.windows.acquisitions, 2)
 
     def test_failed_update_keeps_previous_snapshot(self):
         self.backend.prepareKeys(str(self.root))
@@ -143,6 +179,100 @@ class PreparationTests(unittest.TestCase):
         self.assertEqual(self.backend.read_active(self.root)['directory'], old['directory'])
         self.backend.open(str(self.root.parent))
         self.assertEqual(self.backend.dispatch('getMessageCount', {'sessionId': 'wxid_peer'})['count'], 5)
+
+    def test_connect_refreshes_changed_sources_and_keeps_old_snapshot_on_failure(self):
+        self.backend.prepareKeys(str(self.root))
+        initial = self.backend.createSnapshot(str(self.root))
+        source = self.root / 'message/message_0.db'
+        key = self.backend.state.load_keys(self.root)['message/message_0.db']
+        plaintext = self.home / 'message-update.db'
+        decrypt_database(source, plaintext, key)
+        connection = sqlite3.connect(plaintext)
+        connection.execute(f'INSERT INTO "{message_table("wxid_peer")}" VALUES(?,?,?,?,?,?,?,?)',
+                            (12, 999, 1, 15, 7, 1700000006, '更新后的新消息', 0))
+        connection.commit()
+        connection.close()
+        encrypt_fixture(plaintext, key)
+        source.write_bytes(plaintext.read_bytes())
+
+        self.windows.running = True
+        with self.assertRaisesRegex(ToolError, 'NEED_EXIT'):
+            self.backend.testConnection(str(self.root.parent))
+        self.assertEqual(self.backend.read_active(self.root)['directory'], initial['directory'])
+        self.backend.open(str(self.root.parent))
+        self.assertEqual(self.backend.dispatch('getMessageCount', {'sessionId': 'wxid_peer'})['count'], 5)
+        self.backend.close()
+
+        self.windows.running = False
+        self.backend.testConnection(str(self.root.parent))
+        updated = self.backend.read_active(self.root)
+        self.assertNotEqual(updated['directory'], initial['directory'])
+        self.backend.open(str(self.root.parent))
+        rows = list(self.backend.message_stream('wxid_peer'))
+        self.assertEqual(len(rows), 6)
+        self.assertEqual(rows[-1]['message_content'], '更新后的新消息')
+
+        active_before_failure = updated['directory']
+        corrupted = bytearray(source.read_bytes())
+        corrupted[-1] ^= 1
+        source.write_bytes(corrupted)
+        with self.assertRaisesRegex(ToolError, 'PAGE_AUTH_FAILED'):
+            self.backend.testConnection(str(self.root.parent))
+        self.assertEqual(self.backend.read_active(self.root)['directory'], active_before_failure)
+
+    def test_duplicate_same_account_directory_is_authenticated_or_reported(self):
+        stale_root, _, _ = encrypted_account(self.home / 'C')
+        from fixtures import make_account, encrypt_fixture
+        from wxtext.cipher import DatabaseKey
+        configured_root, _ = make_account(self.home / 'D')
+        configured_keys = {}
+        for index, path in enumerate(sorted(configured_root.rglob('*.db'))):
+            relative = path.relative_to(configured_root).as_posix()
+            key = DatabaseKey(bytes([90 + index]) * 32, bytes([120 + index]) * 16)
+            encrypt_fixture(path, key)
+            configured_keys[relative] = key
+        records = [
+            {'dataDir': stale_root, 'source': 'documents'},
+            {'dataDir': configured_root, 'source': 'config'},
+        ]
+        self.backend.windows = FakeWindows(configured_keys)
+        with patch('weflow_backend.backend.discover_data_dir_records', return_value=records):
+            with self.assertRaises(ToolError) as caught:
+                self.backend.prepareKeys(str(stale_root))
+            self.assertEqual(caught.exception.code, 'ACCOUNT_DIRECTORY_MISMATCH')
+            self.assertEqual(caught.exception.details['suggestedDataDir'], str(configured_root))
+
+            # The automatic path uses the configured directory after the
+            # same current-process keys authenticate it uniquely.
+            result = self.backend.prepareKeys()
+        self.assertEqual(Path(result['dataDir']), configured_root)
+        self.assertEqual(result['directorySource'], 'config')
+
+    def test_complete_selected_config_cache_ignores_other_stale_cache(self):
+        stale_root, stale_keys, _ = encrypted_account(self.home / 'C')
+        from fixtures import make_account, encrypt_fixture
+        from wxtext.cipher import DatabaseKey
+        configured_root, _ = make_account(self.home / 'D')
+        configured_keys = {}
+        for index, path in enumerate(sorted(configured_root.rglob('*.db'))):
+            relative = path.relative_to(configured_root).as_posix()
+            key = DatabaseKey(bytes([110 + index]) * 32, bytes([140 + index]) * 16)
+            encrypt_fixture(path, key)
+            configured_keys[relative] = key
+        self.backend.state.save_keys(stale_root, stale_keys, {'synthetic': True})
+        self.backend.state.save_keys(configured_root, configured_keys, {'synthetic': True})
+        self.backend.state.select(stale_root, 'wxid_me', 'documents')
+        self.backend.windows = FakeWindows()
+        records = [
+            {'dataDir': stale_root, 'source': 'documents'},
+            {'dataDir': configured_root, 'source': 'config'},
+        ]
+        with patch('weflow_backend.backend.discover_data_dir_records', return_value=records):
+            explicit = self.backend.prepareKeys(str(configured_root))
+            automatic = self.backend.prepareKeys()
+        self.assertEqual(Path(explicit['dataDir']), configured_root)
+        self.assertEqual(Path(automatic['dataDir']), configured_root)
+        self.assertEqual(self.backend.windows.acquisitions, 0)
 
 
 if __name__ == '__main__':

@@ -16,9 +16,6 @@ function HomePage() {
           ))}
         </div>
         <p className="home-subtitle">每一条消息的背后，都藏着一段温暖的时光</p>
-        <button className="btn btn-primary" onClick={() => window.electronAPI.window.openOnboardingWindow()}>
-          准备 / 更新聊天记录
-        </button>
       </div>
     </div>
   )

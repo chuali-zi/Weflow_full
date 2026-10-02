@@ -4,7 +4,7 @@ from pathlib import Path
 import sys
 import uuid
 
-from fixtures import make_account, install_snapshot
+from fixtures import make_account, install_snapshot, encrypt_fixture
 from weflow_backend.backend import Backend
 from wxtext.cipher import DatabaseKey
 
@@ -16,6 +16,8 @@ backend = Backend(state)
 install_snapshot(backend, root)
 keys = {p.relative_to(root).as_posix(): DatabaseKey(bytes([index + 1]) * 32, bytes([index + 10]) * 16)
         for index, p in enumerate(sorted(root.rglob('*.db')))}
+for relative, key in keys.items():
+    encrypt_fixture(root / relative, key)
 backend.state.save_keys(root, keys, {'synthetic': True})
 backend.state.select(root, 'wxid_me')
 backend.close()

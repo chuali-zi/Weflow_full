@@ -24,6 +24,7 @@ class FakeWindows:
         self.keys = keys or {}
         self.running = False
         self.acquisitions = 0
+        self.last_required = None
 
     def ensure_stopped(self):
         if self.running:
@@ -31,7 +32,13 @@ class FakeWindows:
 
     def acquire(self, headers, existing, timeout, progress, required=None):
         self.acquisitions += 1
-        return {**existing, **self.keys}, {"synthetic": True}
+        self.last_required = set(required or ())
+        matched = dict(existing)
+        for name, key in self.keys.items():
+            for header_name in headers:
+                if header_name == name or header_name.endswith("/" + name):
+                    matched[header_name] = key
+        return matched, {"synthetic": True}
 
 
 def make_account(home):
@@ -116,6 +123,12 @@ def encrypt_fixture(path, key):
 
 def encrypted_account(home):
     root, text = make_account(home)
+    (root / 'media').mkdir()
+    media = sqlite3.connect(root / 'media/media_0.db')
+    media.execute('CREATE TABLE media_item(id INTEGER PRIMARY KEY, file_name TEXT)')
+    media.execute("INSERT INTO media_item(file_name) VALUES('synthetic-image')")
+    media.commit()
+    media.close()
     keys = {}
     for index, path in enumerate(sorted(root.rglob('*.db'))):
         key = DatabaseKey(bytes([index + 30]) * 32, bytes([index + 60]) * 16)

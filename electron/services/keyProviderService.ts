@@ -13,7 +13,22 @@ import { integratedClient } from './integratedService'
  * 找不到/未配置可执行文件时，直接返回 {success:false, error:'未配置...'}，不做任何来源校验。
  */
 
-type DbKeyResult = { success: boolean; key?: string; accountId?: string; error?: string; logs?: string[] }
+type DbKeyResult = {
+  success: boolean
+  key?: string
+  accountId?: string
+  /** WeFlow 数据库根目录，界面可用此值纠正同账号的旧目录选择。 */
+  dbPath?: string
+  /** 被扫描并解密的账号数据目录。 */
+  dataDir?: string
+  error?: string
+  message?: string
+  hint?: string
+  logs?: string[]
+  code?: string
+  action?: string
+  details?: Record<string, unknown>
+}
 type ImageKeyResult = { success: boolean; xorKey?: number; aesKey?: string; verified?: boolean; error?: string }
 
 const NOT_CONFIGURED_ERROR = '未配置外部密钥获取实现，请在设置中指定可执行文件路径'
@@ -31,6 +46,10 @@ export class KeyProviderService {
     return configured && existsSync(configured) ? configured : null
   }
 
+  private hasConfiguredProvider(): boolean {
+    return Boolean(String(this.configService.get('keyProviderPath') || '').trim())
+  }
+
   private invoke<T extends { success: boolean; error?: string }>(
     request: ProviderRequest,
     onStatus?: (message: string, level: number) => void,
@@ -38,7 +57,11 @@ export class KeyProviderService {
   ): Promise<T> {
     const providerPath = this.getProviderPath()
     if (!providerPath) {
-      return Promise.resolve({ success: false, error: NOT_CONFIGURED_ERROR } as T)
+      const configured = String(this.configService.get('keyProviderPath') || '').trim()
+      return Promise.resolve({
+        success: false,
+        error: configured ? `已配置的外部密钥工具不存在: ${configured}` : NOT_CONFIGURED_ERROR
+      } as T)
     }
 
     return new Promise<T>((resolve) => {
@@ -113,8 +136,8 @@ export class KeyProviderService {
     accountId?: string,
     internalDbKeyHex?: string
   ): Promise<DbKeyResult> {
-    if (!this.getProviderPath()) {
-      return integratedClient().call('prepareKeys', { dbPath, accountId }, (message) => onStatus?.(message, 0))
+    if (!this.hasConfiguredProvider()) {
+      return integratedClient().call<DbKeyResult>('prepareKeys', { dbPath, accountId }, (message) => onStatus?.(message, 0))
     }
     return this.invoke<DbKeyResult>(
       { action: 'get_db_key', dbPath, accountId, internalDbKeyHex },

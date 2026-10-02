@@ -45,6 +45,8 @@ def memory_chunks(reader, deadline: float, regions=None):
 class KeyMatcher:
     def __init__(self, headers: dict[str, bytes], existing=None, required=None):
         self.headers = headers
+        # ``required`` is the minimum set needed to complete an operation.  A
+        # caller that wants a full bounded pass can set it to all headers.
         self.required = set(headers if required is None else required)
         self.keys = dict(existing or {})
         self.tested = set()

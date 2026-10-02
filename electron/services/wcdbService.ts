@@ -31,6 +31,7 @@ export class WcdbService {
   private maintenanceDepth = 0
   private maintenanceReason = '数据库维护中，请稍后重试'
   private shuttingDown = false
+  private configurationQueue: Promise<void> = Promise.resolve()
 
   constructor() {}
 
@@ -57,18 +58,20 @@ export class WcdbService {
     if (this.worker) return
     this.shuttingDown = false
 
+    const workerFile = this.libPath?.trim() ? 'wcdbWorker.js' : 'localWcdbWorker.js'
     const workerCandidates = [
-      join(__dirname, 'wcdbWorker.js'),
-      join(__dirname, '../dist-electron/wcdbWorker.js'),
-      join(__dirname, '../../dist-electron/wcdbWorker.js'),
+      join(__dirname, workerFile),
+      join(__dirname, '../dist-electron', workerFile),
+      join(__dirname, '../../dist-electron', workerFile),
     ]
     const finalPath = workerCandidates.find((candidate) => existsSync(candidate))
       || workerCandidates[0]
 
     try {
-      this.worker = new Worker(finalPath)
+      const worker = new Worker(finalPath)
+      this.worker = worker
 
-      this.worker.on('message', (msg: any) => {
+      worker.on('message', (msg: any) => {
         const { id, result, error, type, payload } = msg
 
         if (type === 'monitor') {
@@ -86,7 +89,8 @@ export class WcdbService {
         }
       })
 
-      this.worker.on('error', (err) => {
+      worker.on('error', (err) => {
+        if (this.worker !== worker) return
         this.openIdentity = null
         // Worker 发生错误，需要 reject 所有 pending promises
         console.error('WCDB Worker 错误:', err)
@@ -97,7 +101,10 @@ export class WcdbService {
         this.pending.clear()
       })
 
-      this.worker.on('exit', (code) => {
+      worker.on('exit', (code) => {
+        // A worker deliberately replaced by setLibPath must not clear the new
+        // worker when its asynchronous exit event arrives.
+        if (this.worker !== worker) return
         this.openIdentity = null
         // Worker 退出，需要 reject 所有 pending promises
         if (code !== 0 && !this.shuttingDown) {
@@ -112,13 +119,11 @@ export class WcdbService {
       })
 
       // 如果已有路径配置，重新发送给新的 worker
-      if (this.resourcesPath && this.userDataPath) {
-        this.setPaths(this.resourcesPath, this.userDataPath)
+      if (this.userDataPath) {
+        this.worker.postMessage({ id: ++this.messageId, type: 'setPaths', payload: { resourcesPath: this.resourcesPath || '', userDataPath: this.userDataPath } })
       }
-      if (this.libPath) {
-        this.setLibPath(this.libPath)
-      }
-      this.setLogEnabled(this.logEnabled)
+      this.worker.postMessage({ id: ++this.messageId, type: 'setLibPath', payload: { libPath: this.libPath || '' } })
+      this.worker.postMessage({ id: ++this.messageId, type: 'setLogEnabled', payload: { enabled: this.logEnabled } })
       if (this.monitorListener) {
         this.callWorker<{ success?: boolean }>('setMonitor').catch(() => { })
       }
@@ -131,10 +136,8 @@ export class WcdbService {
   /**
    * 发送消息到 Worker 并等待响应
    */
-  private callWorker<T>(type: string, payload: any = {}): Promise<T> {
-    if (!this.worker) this.initWorker()
+  private postWorkerMessage<T>(type: string, payload: any = {}): Promise<T> {
     if (!this.worker) return Promise.reject(new Error('WCDB Worker 不可用'))
-
     return new Promise((resolve, reject) => {
       const id = ++this.messageId
       this.pending.set(id, { resolve, reject })
@@ -142,21 +145,61 @@ export class WcdbService {
     })
   }
 
+  private callWorker<T>(type: string, payload: any = {}): Promise<T> {
+    return this.configurationQueue.then(() => {
+      if (!this.worker) this.initWorker()
+      return this.postWorkerMessage<T>(type, payload)
+    })
+  }
+
+  private queueConfiguration(update: () => Promise<void> | void): void {
+    this.configurationQueue = this.configurationQueue.then(update, update).then(() => undefined)
+  }
+
+  private async restartWorker(): Promise<void> {
+    // Let requests already posted to the old worker finish before replacing it.
+    // The config queue blocks new calls while it waits, so their results cannot
+    // be accidentally delivered to a worker with a different backend.
+    while (this.pending.size > 0) {
+      await new Promise((resolve) => setTimeout(resolve, 10))
+    }
+    const oldWorker = this.worker
+    if (!oldWorker) return
+    this.worker = null
+    this.openIdentity = null
+    const error = new Error('WCDB 配置已更改，请重新连接数据库。')
+    for (const pending of this.pending.values()) pending.reject(error)
+    this.pending.clear()
+    await oldWorker.terminate().catch(() => undefined)
+  }
+
   /**
    * 设置资源路径
    */
   setPaths(resourcesPath: string, userDataPath: string): void {
+    const changed = this.resourcesPath !== resourcesPath || this.userDataPath !== userDataPath
     this.resourcesPath = resourcesPath
     this.userDataPath = userDataPath
-    this.callWorker('setPaths', { resourcesPath, userDataPath }).catch(() => { })
+    this.queueConfiguration(async () => {
+      if (this.worker && changed) await this.restartWorker()
+      if (this.worker) await this.postWorkerMessage('setPaths', { resourcesPath: resourcesPath || '', userDataPath })
+    })
   }
 
   /**
    * 设置第三方 WCDB 实现的库文件路径（用户自备，不再内置校验来源）。
    */
   setLibPath(libPath: string): void {
+    const previousPath = this.libPath?.trim() || ''
     this.libPath = libPath
-    this.callWorker('setLibPath', { libPath }).catch(() => { })
+    const nextPath = this.libPath?.trim() || ''
+    this.queueConfiguration(async () => {
+      // WcdbCore keeps an initialized native library alive. Restart for every
+      // path change, including native DLL A -> DLL B, so a config edit cannot
+      // silently continue using the previously loaded library.
+      if (previousPath !== nextPath) await this.restartWorker()
+      if (this.worker) await this.postWorkerMessage('setLibPath', { libPath })
+    })
   }
 
   /**
@@ -164,7 +207,9 @@ export class WcdbService {
    */
   setLogEnabled(enabled: boolean): void {
     this.logEnabled = enabled
-    this.callWorker('setLogEnabled', { enabled }).catch(() => { })
+    this.queueConfiguration(async () => {
+      if (this.worker) await this.postWorkerMessage('setLogEnabled', { enabled })
+    })
   }
 
   /**
@@ -172,7 +217,9 @@ export class WcdbService {
    */
   setMonitor(callback: (type: string, json: string) => void): void {
     this.monitorListener = callback;
-    this.callWorker<{ success?: boolean }>('setMonitor').catch(() => { });
+    this.queueConfiguration(async () => {
+      if (this.worker) await this.postWorkerMessage<{ success?: boolean }>('setMonitor')
+    })
   }
 
   /**

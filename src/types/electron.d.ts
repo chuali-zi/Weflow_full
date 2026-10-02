@@ -480,14 +480,6 @@ export interface RelayOneOrderInfo {
 }
 
 export interface ElectronAPI {
-  integrated: {
-    discover: () => Promise<{ success: boolean; accounts: Array<{ dataDir: string; accountId: string; directoryName: string; capturedAt?: string }>; error?: string }>
-    status: (dataDir: string) => Promise<{ success: boolean; ready?: boolean; capturedAt?: string; error?: string }>
-    prepareKeys: (dataDir: string) => Promise<{ success: boolean; verifiedDatabases?: number; unavailableDatabases?: string[]; error?: string; action?: string }>
-    prepareSnapshot: (dataDir: string) => Promise<{ success: boolean; capturedAt?: string; error?: string; action?: string }>
-    activate: (dataDir: string) => Promise<{ success: boolean; capturedAt?: string; error?: string; action?: string }>
-    onProgress: (callback: (message: string) => void) => () => void
-  }
   window: {
     minimize: () => void
     maximize: () => void
@@ -731,7 +723,20 @@ export interface ElectronAPI {
     onProgress: (callback: (progress: BackupProgress) => void) => () => void
   }
   key: {
-    autoGetDbKey: (dbPath?: string, accountId?: string, internalDbKeyHex?: string) => Promise<{ success: boolean; key?: string; accountId?: string; error?: string; logs?: string[] }>
+    autoGetDbKey: (dbPath?: string, accountId?: string, internalDbKeyHex?: string) => Promise<{
+      success: boolean
+      key?: string
+      accountId?: string
+      dbPath?: string
+      dataDir?: string
+      error?: string
+      message?: string
+      hint?: string
+      code?: string
+      action?: string
+      details?: Record<string, unknown>
+      logs?: string[]
+    }>
     trace?: (stage: string, data?: unknown) => void
     autoGetImageKey: (manualDir?: string, accountId?: string) => Promise<{ success: boolean; xorKey?: number; aesKey?: string; verified?: boolean; error?: string }>
     scanImageKeyFromMemory: (userDir: string) => Promise<{ success: boolean; xorKey?: number; aesKey?: string; error?: string }>

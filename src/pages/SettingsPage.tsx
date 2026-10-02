@@ -1447,6 +1447,10 @@ function SettingsPage({ onClose }: SettingsPageProps = {}) {
       })
       if (result.success && result.key) {
         const resolvedAccountId = result.accountId || accountId
+        if (result.dbPath && result.dbPath !== dbPath) {
+          setDbPath(result.dbPath)
+          await configService.setDbPath(result.dbPath)
+        }
         setDecryptKey(result.key)
         if (resolvedAccountId) {
           setAccountId(resolvedAccountId)
@@ -2656,19 +2660,16 @@ function SettingsPage({ onClose }: SettingsPageProps = {}) {
       <div className="divider" />
 
       <div className="form-group">
-        <label>内置解密与查询后端</label>
+        <label>第三方组件路径</label>
         <span className="form-hint">
-          本整合版已内置 wxtext 解密、查询和导出能力。无需填写组件路径；通过首页“准备 / 更新聊天记录”刷新本地记录副本。
+          密钥获取工具和 WCDB 路径留空时使用内置解密与查询后端；填写后优先使用所选组件。媒体解密等功能仍需提供对应组件。
         </span>
       </div>
 
-      <details>
-      <summary>高级组件选项（通常无需配置）</summary>
       <div className="form-group">
-        <label>旧 WCDB 实现路径</label>
-        <span className="form-hint">本整合版使用内置数据库后端，此旧字段保留但不启用</span>
+        <label>WCDB 实现路径</label>
+        <span className="form-hint">用于读取目标应用数据库的动态库文件（.dll/.so/.dylib）</span>
         <input
-          disabled
           type="text"
           placeholder="未配置"
           value={wcdbLibPath}
@@ -2678,7 +2679,7 @@ function SettingsPage({ onClose }: SettingsPageProps = {}) {
             scheduleConfigSave('wcdbLibPath', () => configService.setWcdbLibPath(value))
           }}
         />
-        <button disabled className="btn btn-secondary btn-sm" onClick={handleSelectWcdbLibPath}><FolderOpen size={14} /> 浏览选择</button>
+        <button className="btn btn-secondary btn-sm" onClick={handleSelectWcdbLibPath}><FolderOpen size={14} /> 浏览选择</button>
       </div>
 
       <div className="form-group">
@@ -2728,7 +2729,6 @@ function SettingsPage({ onClose }: SettingsPageProps = {}) {
         />
         <button className="btn btn-secondary btn-sm" onClick={handleSelectWelivePath}><FolderOpen size={14} /> 浏览选择</button>
       </div>
-      </details>
 
       <div className="form-group">
         <label>系统保留账号 ID <span className="optional">(可选)</span></label>

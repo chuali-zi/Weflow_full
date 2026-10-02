@@ -11,7 +11,6 @@ import {
 import ConfirmDialog from '../components/ConfirmDialog'
 import ErrorReferenceLink from '../components/ErrorReferenceLink'
 import './WelcomePage.scss'
-import IntegratedSetup from './IntegratedSetup'
 
 const isMac = navigator.userAgent.toLowerCase().includes('mac')
 const isLinux = navigator.userAgent.toLowerCase().includes('linux')
@@ -63,7 +62,7 @@ const isDbKeyReadyMessage = (message: string): boolean => {
   return message.includes('现在可以登录') || message.includes('现在请登录目标应用')
 }
 
-export function LegacyWelcomePage({ standalone = false }: WelcomePageProps) {
+function WelcomePage({ standalone = false }: WelcomePageProps) {
   const navigate = useNavigate()
   const location = useLocation()
   const { isDbConnected, setDbConnected, setLoading } = useAppStore()
@@ -93,6 +92,7 @@ export function LegacyWelcomePage({ standalone = false }: WelcomePageProps) {
   const [lastDbKeyError, setLastDbKeyError] = useState('')
   const imagePrefetchAttemptRef = useRef<string>('')
   const imageAutoAttemptRef = useRef<string>('')
+  const preserveAcquiredKeyOnPathChangeRef = useRef(false)
 
   // 安全相关 state
   const [enableAuth, setEnableAuth] = useState(false)
@@ -188,10 +188,12 @@ export function LegacyWelcomePage({ standalone = false }: WelcomePageProps) {
   }, [isDbConnected, standalone, navigate])
 
   useEffect(() => {
-    setAccountId('')
+    const preserveAcquiredKey = preserveAcquiredKeyOnPathChangeRef.current
+    preserveAcquiredKeyOnPathChangeRef.current = false
+    if (!preserveAcquiredKey) setAccountId('')
     setIsImageKeyVerified(false)
     setIsImageStepAutoCompleted(false)
-    if (isAddAccountMode) {
+    if (isAddAccountMode && !preserveAcquiredKey) {
       setHasReacquiredDbKey(false)
       setDecryptKey('')
     }
@@ -363,6 +365,10 @@ export function LegacyWelcomePage({ standalone = false }: WelcomePageProps) {
       })
       if (result.success && result.key) {
         setDecryptKey(result.key)
+        if (result.dbPath && result.dbPath !== dbPath) {
+          preserveAcquiredKeyOnPathChangeRef.current = true
+          setDbPath(result.dbPath)
+        }
         if (result.accountId) {
           setAccountId(result.accountId)
         }
@@ -372,6 +378,16 @@ export function LegacyWelcomePage({ standalone = false }: WelcomePageProps) {
       } else {
         if (isAddAccountMode) {
           setHasReacquiredDbKey(false)
+        }
+        const details = [result.message || result.error]
+        if (result.code) details.push(`错误代码：${result.code}`)
+        if (result.hint) details.push(result.hint)
+        if (result.action) details.push(result.action)
+        if (result.details?.suggestedDbPath) {
+          details.push(`建议数据库根目录：${result.details.suggestedDbPath}`)
+        }
+        if (result.details?.suggestedDataDir) {
+          details.push(`建议账号数据目录：${result.details.suggestedDataDir}`)
         }
         if (
           result.error?.includes('未找到安装路径') ||
@@ -387,7 +403,7 @@ export function LegacyWelcomePage({ standalone = false }: WelcomePageProps) {
           if (result.error?.includes('尚未完成登录')) {
             setDbKeyStatus('请先在目标应用完成登录后重试')
           }
-          const failureMessage = formatDbKeyFailureMessage(result.error, result.logs)
+          const failureMessage = formatDbKeyFailureMessage(details.filter(Boolean).join('；'), result.logs)
           setError(failureMessage)
           setLastDbKeyError(failureMessage)
         }
@@ -1111,6 +1127,4 @@ ${isLinux ? `
   )
 }
 
-export default function WelcomePage({ standalone = false }: WelcomePageProps) {
-  return <IntegratedSetup standalone={standalone} />
-}
+export default WelcomePage

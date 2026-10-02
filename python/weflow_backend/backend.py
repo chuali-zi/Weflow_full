@@ -19,12 +19,12 @@ from wxtext.errors import ToolError
 from wxtext.snapshot import inventory, snapshot
 from wxtext.state import StateStore, atomic_write
 from wxtext.wal import apply_wal
-from wxtext.windows import WindowsSource, discover_data_dirs
+from wxtext.windows import WindowsSource, discover_data_dir_records
 
 
 def account_root(value=None, account_id=None):
     if not value:
-        choices = discover_data_dirs()
+        choices = [item["dataDir"] for item in discover_data_dir_records()]
         if len(choices) != 1:
             raise ToolError("ACCOUNT_REQUIRED", "请选择要读取的微信账号目录。",
                             details={"candidates": [str(p) for p in choices]})
@@ -88,7 +88,7 @@ class Backend:
     def read_active(self, root):
         path = self.active_path(root)
         if not path.exists():
-            raise ToolError("SNAPSHOT_REQUIRED", "尚未准备聊天记录，请点击“准备记录”。")
+            raise ToolError("SNAPSHOT_REQUIRED", "聊天记录副本尚未准备，请先在原界面获取密钥并连接数据库。")
         value = json.loads(path.read_text(encoding="utf-8"))
         directory = Path(value["directory"]).resolve()
         if not directory.is_relative_to(path.parent.resolve()) or not directory.is_dir():
@@ -96,14 +96,16 @@ class Backend:
         return value
 
     def discover(self, **_):
-        candidates = discover_data_dirs()
+        records = discover_data_dir_records()
+        candidates = [record["dataDir"] for record in records]
         selected = self.state.settings().get("data_dir")
         if selected and Path(selected).is_dir() and Path(selected) not in candidates:
-            candidates.insert(0, Path(selected))
+            candidates.append(Path(selected))
         result = []
         for path in candidates:
+            record = next((item for item in records if item["dataDir"] == path), {})
             item = {"dataDir": str(path), "accountId": clean_id(path.parent.name),
-                    "directoryName": path.parent.name}
+                    "directoryName": path.parent.name, "directorySource": record.get("source", "selected")}
             try:
                 item["capturedAt"] = self.read_active(path)["capturedAt"]
             except (ToolError, ValueError, KeyError):
@@ -112,8 +114,138 @@ class Backend:
         return {"success": True, "accounts": result}
 
     def prepareKeys(self, dataDir=None, dbPath=None, accountId=None, refresh=False, **_):
-        root = account_root(dataDir or dbPath, accountId)
+        supplied = dataDir or dbPath
+        records = discover_data_dir_records() if os.name == "nt" else []
+        source_map = {str(item["dataDir"]): item.get("source", "unknown") for item in records}
+        if supplied:
+            root = account_root(supplied, accountId)
+            explicit = True
+            directory_source = "explicit"
+            if str(root) in source_map:
+                directory_source = source_map[str(root)]
+        else:
+            settings = self.state.settings()
+            choices = [item["dataDir"] for item in records]
+            # WeChat's own config is authoritative. A saved selection is only
+            # a fallback when it is the sole discovered account directory.
+            configured = [item["dataDir"] for item in records if item.get("source") == "config"]
+            preferred = configured or choices
+            if accountId:
+                preferred = [path for path in preferred if clean_id(path.parent.name) == accountId]
+            selected = Path(settings["data_dir"]).resolve() if settings.get("data_dir") else None
+            if len(set(configured)) > 1 and selected not in configured and not accountId:
+                raise ToolError("ACCOUNT_REQUIRED", "检测到多个微信配置账号，请在原有账号路径栏选择目标账号。",
+                                details={"candidates": [str(path) for path in configured]})
+            root = selected if selected in preferred else preferred[0] if preferred else None
+            if root is None:
+                raise ToolError("ACCOUNT_REQUIRED", "检测到多个微信数据目录，请在原有账号路径栏选择一个。",
+                                details={"candidates": [str(path) for path in preferred]})
+            explicit = False
+            directory_source = source_map.get(str(root), "config")
+
+        # A matching account ID may have stale copies in multiple folders.
+        # Scan their headers together so one bounded memory pass proves which
+        # location belongs to the running process. It never inspects/mutates
+        # the database body.
+        candidate_roots = [root]
+        account_id = clean_id(root.parent.name)
+        if os.name == "nt":
+            candidate_roots.extend(item["dataDir"] for item in records if item["dataDir"] != root and
+                                   (not supplied or clean_id(item["dataDir"].parent.name) == account_id))
+        unique_roots = list(dict.fromkeys(path.resolve() for path in candidate_roots))
+        root_alias = {path: hashlib.sha256(os.path.normcase(str(path)).encode()).hexdigest()[:16]
+                      for path in unique_roots}
+        combined_headers = {}
+        per_root_headers = {}
+        for candidate in unique_roots:
+            current = self.database_headers(candidate)
+            per_root_headers[candidate] = current
+            alias = root_alias[candidate]
+            combined_headers.update({f"{alias}/{name}": header for name, header in current.items()})
+
+        combined_keys = {}
+        for candidate in unique_roots:
+            if refresh:
+                continue
+            alias = root_alias[candidate]
+            cached = self.state.load_keys(candidate)
+            current = per_root_headers[candidate]
+            combined_keys.update({f"{alias}/{name}": key for name, key in cached.items()
+                                  if name in current and verify_key(key, current[name])})
+
+        selected_alias = root_alias[root]
+        selected_cache_complete = all(f"{selected_alias}/{name}" in combined_keys
+                                      for name in per_root_headers[root])
+        missing_all = set(combined_headers) - combined_keys.keys()
+        diagnostics = {"source": "verified_cache"}
+        if missing_all and not selected_cache_complete:
+            try:
+                # All known databases are the completion set. Reaching the
+                # core-message subset must not terminate this bounded pass.
+                combined_keys, diagnostics = self.source().acquire(
+                    combined_headers, combined_keys, 120, self.progress, required=set(combined_headers))
+            except ToolError as error:
+                # Cached core keys remain useful when WeChat is logged out;
+                # optional gaps are reported below. Other acquisition errors
+                # still matter when core keys are absent.
+                if error.code != "NEED_LOGIN" or not combined_keys:
+                    raise
+                diagnostics = {"source": "verified_cache", "scan_error": error.code}
+
+        matched_roots = {}
+        for candidate in unique_roots:
+            alias = root_alias[candidate]
+            headers_for_root = per_root_headers[candidate]
+            keys_for_root = {name: combined_keys[f"{alias}/{name}"] for name in headers_for_root
+                             if f"{alias}/{name}" in combined_keys and
+                             verify_key(combined_keys[f"{alias}/{name}"], headers_for_root[name])}
+            matched_roots[candidate] = keys_for_root
+
+        selected_keys = matched_roots[root]
+        matched_paths = [path for path, keys in matched_roots.items() if keys]
+        configured_roots = {item["dataDir"].resolve() for item in records if item.get("source") == "config"}
+        selected_config_is_unique = (not explicit and directory_source == "config" and
+                                     configured_roots == {root} and selected_cache_complete)
+        if selected_config_is_unique:
+            matched_paths = [root]
+        if not explicit and len(matched_paths) > 1:
+            raise ToolError("ACCOUNT_REQUIRED", "多个微信数据目录都能通过密钥认证，请在原有账号路径栏选择目标目录。",
+                            details={"candidates": [str(path) for path in matched_paths]})
+        if not selected_keys and len([path for path, keys in matched_roots.items() if keys]) == 1:
+            matched_root = next(path for path, keys in matched_roots.items() if keys)
+            suggestion = {"accountId": clean_id(matched_root.parent.name),
+                          "suggestedDbPath": str(matched_root.parent.parent),
+                          "suggestedDataDir": str(matched_root)}
+            if explicit:
+                raise ToolError("ACCOUNT_DIRECTORY_MISMATCH",
+                                "所选微信数据目录与当前运行的微信账号不匹配。",
+                                "请改用微信配置指向的数据目录后重新获取密钥。", suggestion)
+            root = matched_root
+            directory_source = source_map.get(str(root), "authenticated")
+            selected_keys = matched_roots[root]
+
+        for candidate, keys in matched_roots.items():
+            self.state.save_keys(candidate, keys, diagnostics)
+
         required = set(inventory(root))
+        verified = selected_keys
+        self.state.select(root, clean_id(root.parent.name), directory_source)
+        missing = sorted(required - verified.keys())
+        if missing:
+            raise ToolError("KEY_NOT_FOUND", "尚未取得全部核心聊天数据库密钥。",
+                            "保持微信登录并打开目标聊天及历史记录后，再点击获取密钥。",
+                            {"missing_databases": missing, "verified_databases": len(verified),
+                             "unavailable_databases": sorted(per_root_headers[root].keys() - verified.keys()),
+                             "directorySource": directory_source})
+        key = verified["contact/contact.db"].secret.hex()
+        return {"success": True, "key": key, "accountId": clean_id(root.parent.name),
+                "dbPath": str(root.parent.parent), "dataDir": str(root),
+                "directorySource": directory_source,
+                "verifiedDatabases": len(verified),
+                "unavailableDatabases": sorted(per_root_headers[root].keys() - verified.keys())}
+
+    @staticmethod
+    def database_headers(root):
         headers = {}
         for path in sorted(root.rglob("*.db")):
             resolved = path.resolve()
@@ -123,27 +255,7 @@ class Backend:
                 header = stream.read(PROFILE.page_size)
             if len(header) == PROFILE.page_size and not header.startswith(b"SQLite format 3\0"):
                 headers[path.relative_to(root).as_posix()] = header
-        saved = {} if refresh else self.state.load_keys(root)
-        verified = {name: key for name, key in saved.items()
-                    if name in headers and verify_key(key, headers[name])}
-        if required - verified.keys():
-            verified, diagnostics = self.source().acquire(headers, verified, 120, self.progress, required=required)
-        else:
-            diagnostics = {"source": "verified_cache"}
-        verified = {name: key for name, key in verified.items()
-                    if name in headers and verify_key(key, headers[name])}
-        self.state.save_keys(root, verified, diagnostics)
-        self.state.select(root, clean_id(root.parent.name))
-        missing = sorted(required - verified.keys())
-        if missing:
-            raise ToolError("KEY_NOT_FOUND", "部分消息数据库尚未获得有效密钥。",
-                            "在微信打开目标聊天和历史记录后，再点击获取密钥。",
-                            {"missing_databases": missing})
-        key = verified["contact/contact.db"].secret.hex()
-        return {"success": True, "key": key, "accountId": clean_id(root.parent.name),
-                "dbPath": str(root.parent.parent), "dataDir": str(root),
-                "verifiedDatabases": len(verified),
-                "unavailableDatabases": sorted(headers.keys() - verified.keys())}
+        return headers
 
     def createSnapshot(self, dataDir=None, accountId=None, **_):
         root = account_root(dataDir, accountId)
@@ -198,7 +310,8 @@ class Backend:
                 "accountId": meta["accountId"], "capturedAt": meta["capturedAt"]}
 
     def exportRaw(self, request, **_):
-        self.open(request["account"]["accountDir"])
+        root = self.export_account_root(request)
+        self.open(str(root))
         output = Path(request.get("exportsDir") or request["outputDir"]).resolve()
         if output.is_relative_to(self.root.parent):
             raise ToolError("UNSAFE_PATH", "导出目录不能位于微信账号目录中。")
@@ -225,9 +338,28 @@ class Backend:
                 "failedSessionIds": [], "failedSessionErrors": {}, "sessionOutputPaths": paths,
                 "rawSessionOutputPaths": paths, "rawExportManifests": manifests}
 
+    @staticmethod
+    def export_account_root(request):
+        account = request.get("account") or {}
+        account_dir = account.get("accountDir")
+        if account_dir:
+            return account_root(account_dir)
+        session_db = account.get("sessionDb") or request.get("sessionDb")
+        if not session_db:
+            raise ToolError("ACCOUNT_REQUIRED", "WeFlow未提供账号目录或会话数据库路径。",
+                            "请在原界面选择微信账号后重新连接。")
+        path = Path(session_db).expanduser().resolve()
+        if not path.is_file():
+            raise ToolError("DATA_NOT_FOUND", "WeFlow提供的会话数据库路径不存在。", details={"sessionDb": str(path)})
+        root = next((parent for parent in (path.parent, *path.parents) if parent.name.lower() == "db_storage"), None)
+        if root is None or not (root / "contact" / "contact.db").is_file():
+            raise ToolError("ACCOUNT_REQUIRED", "会话数据库路径不属于可识别的微信 db_storage 目录。",
+                            "请在原界面重新选择正确的微信账号目录。", {"sessionDb": str(path)})
+        return root.resolve()
+
     def open(self, accountDir, hexKey="", **_):
         root = account_root(accountDir)
-        meta = self.read_active(root)
+        meta = self.ensure_snapshot(root)
         if self.meta and meta["directory"] == self.meta["directory"] and root == self.root:
             return True
         self.close()
@@ -238,13 +370,64 @@ class Backend:
 
     def testConnection(self, accountDir, hexKey="", **_):
         root = account_root(accountDir)
-        meta = self.read_active(root)
+        meta = self.ensure_snapshot(root, update_if_changed=True)
         connection = open_readonly(Path(meta["directory"]) / "contact/contact.db")
         try:
             connection.execute("SELECT 1 FROM contact LIMIT 1").fetchone()
         finally:
             connection.close()
         return {"success": True, "sessionCount": 0}
+
+    def ensure_snapshot(self, root, update_if_changed=False):
+        required = set(inventory(root))
+        try:
+            meta = self.read_active(root)
+            changed = update_if_changed and self.source_metadata_changed(root, meta)
+            if required <= set(meta.get("files", [])) and not changed:
+                return meta
+        except ToolError as error:
+            if error.code != "SNAPSHOT_REQUIRED":
+                raise
+        # The original WeFlow connect path is also the first-run preparation
+        # path. createSnapshot enforces a normal WeChat exit and uses only
+        # already authenticated per-database cached keys.
+        result = self.createSnapshot(str(root))
+        return result
+
+    @staticmethod
+    def source_metadata_changed(root, meta):
+        """Compare inexpensive source size/mtime/WAL metadata on explicit connect.
+
+        Older and synthetic snapshots without a source manifest remain usable;
+        the next successful capture writes the richer manifest.
+        """
+        sources = meta.get("sources") or []
+        for item in sources:
+            name = item.get("file")
+            if not isinstance(name, str):
+                continue
+            path = (root / name).resolve()
+            if not path.is_relative_to(root.resolve()) or not path.is_file():
+                return True
+            stat = path.stat()
+            if stat.st_size != item.get("size"):
+                return True
+            expected_mtime = item.get("mtime_ns")
+            if expected_mtime is not None and stat.st_mtime_ns != expected_mtime:
+                return True
+            wal_name = name + "-wal"
+            wal = root / wal_name
+            expected_wal = item.get("wal")
+            if wal.exists() != bool(expected_wal):
+                return True
+            if expected_wal:
+                wal_stat = wal.stat()
+                if wal_stat.st_size != expected_wal.get("size"):
+                    return True
+                expected_wal_mtime = expected_wal.get("mtime_ns")
+                if expected_wal_mtime is not None and wal_stat.st_mtime_ns != expected_wal_mtime:
+                    return True
+        return False
 
     def close(self, **_):
         self.cursors.clear()
@@ -548,9 +731,15 @@ class Backend:
         if method == "isConnected":
             return self.meta is not None
         if method == "getLastInitError":
-            return None if self.meta else "尚未准备聊天记录，请重新打开准备页面。"
-        if method in {"setPaths", "setLibPath", "setLogEnabled", "setMonitor", "shutdown", "cloudStop", "cloudInit", "cloudReport"}:
-            return self.close() if method == "shutdown" else {"success": True}
+            return None if self.meta else "聊天记录尚未连接，请检查微信账号目录和数据库副本。"
+        if method == "shutdown":
+            return self.close()
+        if method in {"setPaths", "setLibPath", "setLogEnabled"}:
+            # The Python adapter has no native DLL paths or configurable log
+            # switches; accepting these calls would hide a disconnected UI.
+            raise ToolError("FEATURE_UNAVAILABLE", "内置后端不需要原生库路径或日志开关。", details={"method": method})
+        if method in {"setMonitor", "cloudStop", "cloudInit", "cloudReport"}:
+            raise ToolError("FEATURE_UNAVAILABLE", "内置后端未实现实时监控或云报告。", details={"method": method})
         if method == "getLogs":
             return {"success": True, "logs": []}
         maps = {"getDisplayNames": "display", "getAvatarUrls": "avatar", "getContactAliasMap": "alias", "getContactFriendFlags": "friend"}
@@ -621,5 +810,5 @@ class Backend:
             # Chat participants do not establish the group's complete membership.
             raise ToolError("FEATURE_UNAVAILABLE", "当前副本不提供群成员名单；群聊消息和发言统计仍可读取。")
         if method in {"getHeadImageBuffers", "getEmoticonCaptionStrict", "getEmoticonCaption", "getEmoticonCdnUrl"}:
-            return {"success": True, "map": {}} if method == "getHeadImageBuffers" else {"success": True}
+            raise ToolError("FEATURE_UNAVAILABLE", "当前副本尚未接入头像或表情资源解码。", details={"method": method})
         raise ToolError("FEATURE_UNAVAILABLE", "当前内置后端尚未实现这项功能。", details={"method": method})

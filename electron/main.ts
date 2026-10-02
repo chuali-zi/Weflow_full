@@ -19,7 +19,6 @@ import { annualReportService } from './services/annualReportService'
 import { exportService, ExportOptions, ExportProgress } from './services/export'
 import { exportTaskControlService } from './services/exportTaskControlService'
 import { KeyProviderService } from './services/keyProviderService'
-import { integratedClient, activateIntegratedSnapshot } from './services/integratedService'
 import { voiceTranscribeService } from './services/voiceTranscribeService'
 import { videoService } from './services/videoService'
 import { snsService, isVideoUrl } from './services/snsService'
@@ -5394,18 +5393,6 @@ function registerIpcHandlers() {
       return { success: false, error: String(e) }
     }
   })
-
-  ipcMain.handle('integrated:discover', () => integratedClient().call('discover'))
-  ipcMain.handle('integrated:status', (_, dataDir: string) => integratedClient().call('status', { dataDir }))
-  ipcMain.handle('integrated:prepareKeys', (event, dataDir: string) =>
-    integratedClient().call('prepareKeys', { dataDir }, (message) => event.sender.send('integrated:progress', message)))
-  ipcMain.handle('integrated:prepareSnapshot', async (event, dataDir: string) => {
-    const result = await integratedClient().call('createSnapshot', { dataDir },
-      (message) => event.sender.send('integrated:progress', message))
-    if (!result.success) return result
-    return activateIntegratedSnapshot(dataDir)
-  })
-  ipcMain.handle('integrated:activate', (_, dataDir: string) => activateIntegratedSnapshot(dataDir))
 
   // 密钥获取
   ipcMain.handle('key:autoGetDbKey', async (event, dbPath?: string, accountId?: string, internalDbKeyHex?: string) => {

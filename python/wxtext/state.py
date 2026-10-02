@@ -80,9 +80,12 @@ class StateStore:
         except (ValueError, UnicodeError):
             raise ToolError("CACHE_INVALID", "本地设置文件格式错误。", "重新 prepare --data-dir 指定账号目录。") from None
 
-    def select(self, data_dir: Path, self_id: str | None):
+    def select(self, data_dir: Path, self_id: str | None, directory_source: str | None = None):
+        settings = {"data_dir": str(data_dir.resolve()), "self_id": self_id}
+        if directory_source:
+            settings["directory_source"] = directory_source
         atomic_write(self.root / "settings.json", json.dumps(
-            {"data_dir": str(data_dir.resolve()), "self_id": self_id}, ensure_ascii=False).encode("utf-8"))
+            settings, ensure_ascii=False).encode("utf-8"))
 
     def cache_path(self, data_dir: Path):
         identity = os.path.normcase(str(data_dir.resolve()))

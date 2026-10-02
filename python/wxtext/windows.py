@@ -246,38 +246,70 @@ def file_version(filename: str) -> str | None:
     return f"{major >> 16}.{major & 65535}.{minor >> 16}.{minor & 65535}"
 
 
-def discover_data_dirs() -> list[Path]:
+def parse_config_paths(raw: bytes) -> list[Path]:
+    """Read both bare-path WeChat ini files and key=value variants."""
+    encoding = "utf-16" if raw.startswith((b"\xff\xfe", b"\xfe\xff")) else "utf-8-sig"
+    try:
+        lines = raw.decode(encoding).splitlines()
+    except UnicodeError:
+        return []
+    result = []
+    for line in lines:
+        value = line.partition("=")[2] if "=" in line else line
+        candidate = Path(value.strip().strip('"').strip("\x00"))
+        if candidate.is_absolute():
+            result.append(candidate)
+    return result
+
+
+def discover_data_dir_records() -> list[dict]:
+    """Find database roots, preferring paths explicitly written by WeChat.
+
+    The same account can have stale copies under Documents and its configured
+    custom directory. Preserve the source so callers can explain that choice.
+    """
     require_windows()
-    roots = set()
+    roots = []
+    seen_roots = set()
+    def add_root(path, source):
+        try:
+            path = Path(path).expanduser()
+            key = os.path.normcase(str(path.resolve()))
+        except (OSError, RuntimeError):
+            return
+        if key not in seen_roots:
+            seen_roots.add(key)
+            roots.append((path, source))
+
     profile = Path(os.environ["USERPROFILE"])
-    roots.add(profile / "Documents" / "xwechat_files")
     shell = c.WinDLL("shell32", use_last_error=True)
     personal = bind(shell, "SHGetFolderPathW", c.c_int32, [HANDLE, c.c_int32, HANDLE, DWORD, c.c_wchar_p])
     buffer = c.create_unicode_buffer(260)
-    if personal(None, 5, None, 0, buffer) == 0:
-        roots.add(Path(buffer.value) / "xwechat_files")
+    documents = Path(buffer.value) / "xwechat_files" if personal(None, 5, None, 0, buffer) == 0 else profile / "Documents" / "xwechat_files"
     config = Path(os.environ.get("APPDATA", profile / "AppData" / "Roaming")) / "Tencent" / "xwechat" / "config"
     for ini in config.glob("*.ini"):
         if ini.stat().st_size > 65536:
             continue
         raw = ini.read_bytes()
-        encoding = "utf-16" if raw.startswith((b"\xff\xfe", b"\xfe\xff")) else "utf-8-sig"
-        try:
-            lines = raw.decode(encoding).splitlines()
-        except UnicodeError:
-            continue
-        for line in lines:
-            candidate = Path(line.split("=", 1)[-1].strip().strip('"').strip("\x00"))
-            if candidate.is_absolute():
-                roots.update((candidate, candidate / "xwechat_files"))
-    results = set()
-    for root in roots:
+        for candidate in parse_config_paths(raw):
+            add_root(candidate, "config")
+            add_root(candidate / "xwechat_files", "config")
+    add_root(documents, "documents")
+    add_root(profile / "Documents" / "xwechat_files", "documents")
+    results = {}
+    for root, source in roots:
         if root.name == "db_storage" and (root / "contact" / "contact.db").is_file():
-            results.add(root.resolve())
+            results.setdefault(os.path.normcase(str(root.resolve())), {"dataDir": root.resolve(), "source": source})
         if (root / "db_storage" / "contact" / "contact.db").is_file():
-            results.add((root / "db_storage").resolve())
+            candidate = (root / "db_storage").resolve()
+            results.setdefault(os.path.normcase(str(candidate)), {"dataDir": candidate, "source": source})
         if root.is_dir():
             for candidate in root.glob("*/db_storage"):
                 if (candidate / "contact" / "contact.db").is_file():
-                    results.add(candidate.resolve())
-    return sorted(results)
+                    resolved = candidate.resolve()
+                    results.setdefault(os.path.normcase(str(resolved)), {"dataDir": resolved, "source": source})
+    return list(results.values())
+
+
+def discover_data_dirs() -> list[Path]:
+    return [item["dataDir"] for item in discover_data_dir_records()]
