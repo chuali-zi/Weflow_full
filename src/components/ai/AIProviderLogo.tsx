@@ -1,4 +1,18 @@
-import { Anthropic, DeepSeek, Doubao, Gemini, Kimi, Ollama, OpenAI, ProviderIcon, Qwen, SiliconCloud, XiaomiMiMo, XAI, Yuanbao, Zhipu } from '@lobehub/icons'
+// Import the SVGs directly; the package-wide ProviderIcon requires a separate UI kit.
+import Anthropic from '@lobehub/icons/es/Anthropic/components/Mono'
+import DeepSeek from '@lobehub/icons/es/DeepSeek/components/Mono'
+import Doubao from '@lobehub/icons/es/Doubao/components/Mono'
+import Gemini from '@lobehub/icons/es/Gemini/components/Mono'
+import Kimi from '@lobehub/icons/es/Kimi/components/Mono'
+import Ollama from '@lobehub/icons/es/Ollama/components/Mono'
+import OpenAI from '@lobehub/icons/es/OpenAI/components/Mono'
+import Qwen from '@lobehub/icons/es/Qwen/components/Mono'
+import SiliconCloud from '@lobehub/icons/es/SiliconCloud/components/Mono'
+import XiaomiMiMo from '@lobehub/icons/es/XiaomiMiMo/components/Mono'
+import XAI from '@lobehub/icons/es/XAI/components/Mono'
+import Yuanbao from '@lobehub/icons/es/Yuanbao/components/Mono'
+import Zhipu from '@lobehub/icons/es/Zhipu/components/Mono'
+import Minimax from '@lobehub/icons/es/Minimax/components/Mono'
 import { Sparkles } from '@gravity-ui/icons'
 
 type AIProviderLogoProps = {
@@ -105,7 +119,7 @@ export default function AIProviderLogo({ providerId, logo, alt, className, size 
   }
 
   if (normalizedProviderId && SUPPORTED_PROVIDER_IDS.has(normalizedProviderId)) {
-    return <ProviderIcon provider={normalizedProviderId} type="mono" forceMono size={size} className={unifiedClassName} />
+    return <Minimax size={size} className={unifiedClassName} color="currentColor" />
   }
 
   if (imageLogo) {

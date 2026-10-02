@@ -480,6 +480,14 @@ export interface RelayOneOrderInfo {
 }
 
 export interface ElectronAPI {
+  integrated: {
+    discover: () => Promise<{ success: boolean; accounts: Array<{ dataDir: string; accountId: string; directoryName: string; capturedAt?: string }>; error?: string }>
+    status: (dataDir: string) => Promise<{ success: boolean; ready?: boolean; capturedAt?: string; error?: string }>
+    prepareKeys: (dataDir: string) => Promise<{ success: boolean; verifiedDatabases?: number; unavailableDatabases?: string[]; error?: string; action?: string }>
+    prepareSnapshot: (dataDir: string) => Promise<{ success: boolean; capturedAt?: string; error?: string; action?: string }>
+    activate: (dataDir: string) => Promise<{ success: boolean; capturedAt?: string; error?: string; action?: string }>
+    onProgress: (callback: (message: string) => void) => () => void
+  }
   window: {
     minimize: () => void
     maximize: () => void

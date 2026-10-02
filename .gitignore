@@ -9,6 +9,13 @@ lerna-debug.log*
 
 # Dependencies
 node_modules
+.venv/
+.runtime/
+.npm-cache/
+__pycache__/
+.pytest_cache/
+*.spec
+build/
 dist
 dist-electron
 dist-ssr

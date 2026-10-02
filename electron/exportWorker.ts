@@ -1,5 +1,6 @@
 import { parentPort, workerData } from 'worker_threads'
 import { runWeliveExport, type WeliveExportEvent, type WeliveRawExportManifest } from './services/weliveBridge'
+import { runIntegratedExport } from './services/integratedExport'
 
 interface ExportWorkerConfig {
   mode?: 'sessions' | 'single' | 'contacts'
@@ -431,8 +432,9 @@ async function runWeliveEngine() {
   for (let chunkStart = 0; chunkStart < sessionIds.length; chunkStart += rawChunkSize) {
     const chunkSessionIds = sessionIds.slice(chunkStart, chunkStart + rawChunkSize)
     const firstChunkSessionId = chunkSessionIds[0] || ''
-    const result = await runWeliveExport({
+    const result = await (config.welivePath ? runWeliveExport : runIntegratedExport)({
       resourcesPath: String(config.resourcesPath || ''),
+      userDataPath: String(config.userDataPath || ''),
       appPath: config.resourcesPath ? path.dirname(config.resourcesPath) : __dirname,
       welivePath: config.welivePath,
       weliveArgsPrefix: Array.isArray(config.weliveArgsPrefix) ? config.weliveArgsPrefix : undefined,

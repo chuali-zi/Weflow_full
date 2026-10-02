@@ -315,8 +315,11 @@ export class ConfigService {
       autoDownloadWhitelist: []
     }
 
+    const configDirectory = String(process.env.WEFLOW_CONFIG_CWD || process.env.WEFLOW_USER_DATA_PATH || '').trim()
+      || join(app.getPath('appData'), 'WeFlow-full')
     const storeOptions: any = {
       name: 'WeFlow-config',
+      cwd: configDirectory,
       defaults,
       projectName: String(process.env.WEFLOW_PROJECT_NAME || 'WeFlow').trim() || 'WeFlow'
     }
@@ -1181,7 +1184,7 @@ export class ConfigService {
     if (workerUserDataPath) {
       return workerUserDataPath
     }
-    return app?.getPath?.('userData') || process.cwd()
+    return join(app.getPath('appData'), 'WeFlow-full')
   }
 
   getCacheBasePath(): string {

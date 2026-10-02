@@ -1,6 +1,7 @@
 import { spawn } from 'child_process'
 import { existsSync } from 'fs'
 import { ConfigService } from './config'
+import { integratedClient } from './integratedService'
 
 /**
  * 密钥获取（数据库密钥 / 图片密钥）完全外包给用户自备的第三方可执行程序（keyProviderPath），
@@ -112,6 +113,9 @@ export class KeyProviderService {
     accountId?: string,
     internalDbKeyHex?: string
   ): Promise<DbKeyResult> {
+    if (!this.getProviderPath()) {
+      return integratedClient().call('prepareKeys', { dbPath, accountId }, (message) => onStatus?.(message, 0))
+    }
     return this.invoke<DbKeyResult>(
       { action: 'get_db_key', dbPath, accountId, internalDbKeyHex },
       onStatus,

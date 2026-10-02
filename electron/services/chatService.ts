@@ -632,6 +632,7 @@ class ChatService {
   }
 
   private toCodeOnlyMessage(rawMessage?: string | null, fallbackCode = -3999): string {
+    if (rawMessage && this.extractErrorCode(rawMessage) === null) return rawMessage
     const code = this.extractErrorCode(rawMessage) ?? fallbackCode
     return `错误码: ${code}`
   }

@@ -11,6 +11,7 @@ import {
 import ConfirmDialog from '../components/ConfirmDialog'
 import ErrorReferenceLink from '../components/ErrorReferenceLink'
 import './WelcomePage.scss'
+import IntegratedSetup from './IntegratedSetup'
 
 const isMac = navigator.userAgent.toLowerCase().includes('mac')
 const isLinux = navigator.userAgent.toLowerCase().includes('linux')
@@ -62,7 +63,7 @@ const isDbKeyReadyMessage = (message: string): boolean => {
   return message.includes('现在可以登录') || message.includes('现在请登录目标应用')
 }
 
-function WelcomePage({ standalone = false }: WelcomePageProps) {
+export function LegacyWelcomePage({ standalone = false }: WelcomePageProps) {
   const navigate = useNavigate()
   const location = useLocation()
   const { isDbConnected, setDbConnected, setLoading } = useAppStore()
@@ -1110,4 +1111,6 @@ ${isLinux ? `
   )
 }
 
-export default WelcomePage
+export default function WelcomePage({ standalone = false }: WelcomePageProps) {
+  return <IntegratedSetup standalone={standalone} />
+}

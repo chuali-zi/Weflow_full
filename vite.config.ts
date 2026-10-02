@@ -260,7 +260,7 @@ export default defineConfig({
         }
       },
       {
-        entry: 'electron/wcdbWorker.ts',
+        entry: 'electron/localWcdbWorker.ts',
         onstart: handleElectronOnStart,
         vite: {
           build: {

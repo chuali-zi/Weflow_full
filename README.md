@@ -1,136 +1,82 @@
-<p align="center">
-  <img src="app.jpg" alt="WeFlow 应用预览" width="90%">
-</p>
+# WeFlow 本地整合版
 
-<h1 align="center">WeFlow</h1>
+基于 [hicccc77/WeFlow](https://github.com/hicccc77/WeFlow)，内置 wxtext 的数据库密钥获取、认证解密和聊天查询模块。用户只需取得这一个仓库，双击启动，无需另外寻找 WCDB DLL 或 WeLive 导出程序。
 
-<p align="center">
-  WeFlow 是一个<strong>完全本地</strong>的<strong>实时</strong>聊天记录查看、分析与导出工具。<br>
-  它可以获取你的聊天记录并将其导出，还可以根据你的聊天记录为你生成独一无二的数据与年度报告。
-</p>
+本整合版读取准备好的本地聊天副本，支持聊天查看、搜索、基础统计和导出。目标平台是 **Windows x64 + 微信 4.x**。
 
-<p align="center">
-  <a href="https://github.com/hicccc77/WeFlow/stargazers"><img src="https://img.shields.io/github/stars/hicccc77/WeFlow?style=flat&label=Stars&labelColor=2A3B4C&color=60A5FA" alt="Stargazers"></a>
-  <a href="https://github.com/hicccc77/WeFlow/network/members"><img src="https://img.shields.io/github/forks/hicccc77/WeFlow?style=flat&label=Forks&labelColor=2A3B4C&color=60A5FA" alt="Forks"></a>
-  <a href="https://github.com/hicccc77/WeFlow/releases"><img src="https://img.shields.io/github/downloads/hicccc77/WeFlow/total?style=flat&label=Downloads&labelColor=2A3B4C&color=60A5FA" alt="Downloads"></a>
-  <br><br>
-  <a href="https://t.me/weflow_cc"><img src="https://img.shields.io/badge/Telegram-频道-60A5FA?style=flat&logo=telegram&logoColor=white&labelColor=2A3B4C&color=60A5FA" alt="Telegram Channel" style="height: 24px; vertical-align: middle;"></a>
-  <a href="https://star-history.com/#hicccc77/WeFlow"><img src="https://api.star-history.com/badge?repo=hicccc77/WeFlow&theme=dark" alt="Star History Rank" style="height: 30px; vertical-align: middle;"></a>
-</p>
+## 最简单的用法
 
-> [!TIP]
-> 需要配套的第三方可插拔组件（本项目依赖自定义的原生解密组件，需自行设计，见 [docs/third-party-components.md](docs/third-party-components.md)）
+1. 将本整合版仓库 clone 或下载到本地。
+2. 双击根目录的 **启动 WeFlow.cmd**。
+3. 首次启动会自动安装项目内的运行环境和依赖，并完成构建。需要联网，可能花几分钟；后续启动复用已安装的环境。
+4. 登录电脑微信，在界面中选择账号，点击 **获取密钥，继续准备**。
+5. 从微信托盘菜单正常退出微信，点击 **微信已退出，准备记录并打开**。
+6. 准备完成后，直接查看、搜索或导出聊天记录。此时可以重新打开微信。
 
+已经有记录副本时，点击 **直接打开** 即可。需要最新消息时，从首页 **准备 / 更新聊天记录** 重新准备。
 
-## 主要功能
+关闭微信窗口不等于退出微信。这里的“记录”是准备时的副本，当前没有实时同步。
 
-- 本地实时查看聊天记录
-- 朋友圈图片、视频、**实况**的预览和解密
-- 统计分析与群聊画像
-- 年度报告与可视化概览
-- 导出聊天记录为 HTML 等格式
-- HTTP API 接口（面向开发者）
-- 查看完整能力清单：[详细功能](#详细功能清单)
+## 运行环境
 
-## 支持平台与设备
+启动脚本优先使用本机可用的 Node.js 和 Python，并在项目内建立 Python 环境。缺少合适的运行环境时，自动从官方来源下载便携版。Electron 首先从 GitHub 下载，失败后尝试 npm 镜像，并使用包内的官方校验值验证。无需全局安装 Python 包。
 
-| 平台 | 设备/架构 | 安装包 |
-|------|----------|--------|
-| Windows | Windows10+、x64 | `.exe` |
-| macOS | Apple Silicon（M 系列，arm64） | `.dmg` |
-| Linux | x64 设备（amd64） | `.AppImage`、`.tar.gz` |
+首次启动后生成的 `.venv`、`.runtime`、`node_modules` 等目录均已加入 Git 忽略规则。
 
+数据状态独立保存在：
 
-## 详细功能清单
-
-| 功能模块 | 说明 |
-|---------|------|
-| **聊天** | 解密聊天中的图片、视频、实况；支持**修改**本地消息 |
-| **消息防撤回** | 防止其他人发送的消息被撤回 |
-| **实时弹窗通知** | 新消息到达时提供桌面弹窗提醒，便于及时查看重要会话，提供黑白名单功能 |
-| **私聊分析** | 统计好友间消息数量；分析消息类型与发送比例；查看消息时段分布等 |
-| **群聊分析** | 查看群成员详细信息；分析群内发言排行、活跃时段和媒体内容 |
-| **年度报告** | 生成按年统计的年度报告，或跨年度的长期历史报告 |
-| **双人报告** | 选择指定好友，基于双方聊天记录生成专属分析报告 |
-| **消息导出** | 将聊天记录导出为多种格式：JSON、HTML、Markdown、TXT、Excel、CSV、PGSQL、ChatLab专属格式等 |
-| **朋友圈** | 解密朋友圈图片、视频、实况；导出朋友圈内容；拦截朋友圈的删除与隐藏操作； |
-| **联系人** | 导出好友、群聊、公众号信息；找回部分曾经的好友 |
-| **HTTP API 映射** | 将本地消息能力映射为 HTTP API，便于对接外部系统、自动化脚本与二次开发 |
-
-## HTTP API
-
-WeFlow 提供本地 HTTP API 服务，支持通过接口查询消息数据，可用于与其他工具集成或二次开发。
-
-- **启用方式**：设置 → API 服务 → 启动服务
-- **默认端口**：5031
-- **访问地址**：`http://127.0.0.1:5031`
-- **支持格式**：原始 JSON 或 [ChatLab](https://chatlab.fun/) 标准格式
-
-完整接口文档：[点击查看](docs/HTTP-API.md)
-
-## 面向开发者
-
-如果你想从源码构建或为项目贡献代码，请遵循以下步骤：
-
-```bash
-# 1. 克隆项目到本地
-git clone https://github.com/hicccc77/WeFlow.git
-cd WeFlow
-
-# 2. 安装项目依赖
-npm install
-
-# 3. 运行应用（开发模式）
-npm run dev
+```text
+%APPDATA%\WeFlow-full\backend
 ```
 
-## 推广与合作
+数据库密钥通过 Windows DPAPI 缓存。聊天副本是明文 SQLite，保存在本机当前用户的应用数据目录；原微信数据库按只读方式复制，不在原文件上运行解密或 SQL。
 
-如果您对 **WeFlow** 有兴趣，或者希望与我们展开深度合作或投放你的广告，欢迎随时通过邮件取得联系。我们非常期待与各位创作者、开发者及合作伙伴共同探索。
+## 已接入和目前的边界
 
-### 联系方式
+| 功能 | 整合状态 |
+| --- | --- |
+| 按数据库获取、验证及缓存密钥 | 已内置 |
+| 复制数据库、处理已提交 WAL、逐页认证解密 | 已内置 |
+| 联系人、会话、聊天消息、多分库查询 | 已内置 |
+| 消息分页、文本搜索、发送者识别、压缩长文本 | 已内置 |
+| 基础统计、日期统计、群聊发言统计 | 已内置 |
+| 聊天记录导出 | 内置 JSONL 后端连接原 WeFlow 格式转换器 |
+| 图片 / 视频 / 语音等附件恢复 | 保留上游处理路径，需要另外验证；图片 AES 密钥自动获取未内置 |
+| 完整群成员名单、朋友圈专用查询、部分高级报表 | 尚未完整适配 |
+| 实时同步、数据库写操作 | 当前副本模式不提供 |
 
-欢迎发送邮件至：
+这是一份可继续维护的整合版源码，并不代表已复刻上游所有原生接口。密钥扫描的实际兼容性仍取决于微信版本；合成测试不能代替真实账号验证。
 
-<a href="mailto:yccccccy@proton.me"><img src="https://img.shields.io/badge/Email-yccccccy%40proton.me-60A5FA?style=flat-square&logo=proton&logoColor=white&labelColor=2A3B4C" alt="Protonmail" height="24px"></a>
+## 开发与打包
 
-## 合作伙伴
+安装环境但不启动：
 
-我们非常欢迎优秀的开源社区项目团队或其他团队与我们建立长期合作关系。期待与 WeFlow 携手并进，共同建设更开放的生态！
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts\launch.ps1 -SetupOnly
+```
 
-<p align="center">
-  <!-- 是的你没看错这里还是占位！
-  <a href="https://your-partner-website.com" target="_blank">
-    <img src="https://via.placeholder.com/150x50?text=Partner+1+Logo" alt="Partner Name" width="150" style="margin: 10px; vertical-align: middle;" />
-  </a> -->
-</p>
+检查、构建并启动：
 
----
+```powershell
+npm run test:backend
+npm run build:app
+npm start
+```
 
-## 贡献者
+生成 Windows 安装包：
 
-感谢所有做出贡献的开发者！
+```powershell
+npm run package:win
+```
 
-<p align="center">
-  <a href="https://github.com/hicccc77/WeFlow/graphs/contributors">
-    <img src="https://contrib.rocks/image?repo=hicccc77/WeFlow" alt="Contributors" />
-  </a>
-</p>
+安装包包含 `weflow-backend.exe`，使用安装包的人无需安装 Node.js 或 Python。输出在 `release` 目录，文件名含 `WeFlow-Local`。整合版使用独立应用 ID 与数据目录，并关闭指向上游安装包的自动更新，避免覆盖内置后端。
 
-## Star History
+源码接入位置和验证说明见 [docs/integrated-backend.md](docs/integrated-backend.md)。
 
-<a href="https://www.star-history.com/#hicccc77/WeFlow&type=date&legend=top-left">
-  <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/svg?repos=hicccc77/WeFlow&type=date&theme=dark&legend=top-left" />
-    <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/svg?repos=hicccc77/WeFlow&type=date&legend=top-left" />
-    <img alt="Star History Chart" src="https://api.star-history.com/svg?repos=hicccc77/WeFlow&type=date&legend=top-left" />
-  </picture>
-</a>
+## 来源与许可
 
-<div align="center">
+- 主界面、Electron 应用和导出格式：WeFlow，原作者 **cc / hicccc77**，本次基于上游提交 `837697b`。
+- 数据库密钥扫描、认证解密、WAL、快照及 DPAPI：本项目原有 `abstract_information/wxtext` 工具，现随仓库放在 `python/wxtext`。
+- 本次改动：内置查询适配、准备界面、启动脚本及后端打包。
 
----
-
-**请负责任地使用本工具，遵守相关法律法规**
-
-</div>
+保留上游作者信息和 [LICENSE](LICENSE)（CC BY-NC-SA 4.0）。上游说明原文保存在 [README.upstream.md](README.upstream.md)；其功能说明与下载链接对应上游版本。

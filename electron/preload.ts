@@ -169,6 +169,18 @@ contextBridge.exposeInMainWorld('electronAPI', {
     openPersonaChatWindow: (_sessionId: string) => Promise.resolve(false)
   },
 
+  integrated: {
+    discover: () => ipcRenderer.invoke('integrated:discover'),
+    status: (dataDir: string) => ipcRenderer.invoke('integrated:status', dataDir),
+    prepareKeys: (dataDir: string) => ipcRenderer.invoke('integrated:prepareKeys', dataDir),
+    prepareSnapshot: (dataDir: string) => ipcRenderer.invoke('integrated:prepareSnapshot', dataDir),
+    activate: (dataDir: string) => ipcRenderer.invoke('integrated:activate', dataDir),
+    onProgress: (callback: (message: string) => void) => {
+      const listener = (_event: unknown, message: string) => callback(message)
+      ipcRenderer.on('integrated:progress', listener)
+      return () => ipcRenderer.removeListener('integrated:progress', listener)
+    }
+  },
   // 账号目录（纯手动输入，只做存在性校验）
   account: {
     resolveDir: (dbPath: string, accountId?: string) =>

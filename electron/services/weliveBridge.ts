@@ -70,6 +70,7 @@ export interface WeliveExportRequest {
 }
 
 export interface RunWeliveExportOptions {
+  userDataPath?: string
   request: WeliveExportRequest
   resourcesPath: string
   appPath?: string

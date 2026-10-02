@@ -19,6 +19,7 @@ import { annualReportService } from './services/annualReportService'
 import { exportService, ExportOptions, ExportProgress } from './services/export'
 import { exportTaskControlService } from './services/exportTaskControlService'
 import { KeyProviderService } from './services/keyProviderService'
+import { integratedClient, activateIntegratedSnapshot } from './services/integratedService'
 import { voiceTranscribeService } from './services/voiceTranscribeService'
 import { videoService } from './services/videoService'
 import { snsService, isVideoUrl } from './services/snsService'
@@ -64,10 +65,12 @@ function traceKeyFlow(stage: string, data?: unknown): void {
 // 会自适应压低采集帧率、显著增加回退路径下折射的跟随延迟。
 // 回退采集只在通知展示的数秒内运行且分辨率已降为逻辑尺寸，放开预算不影响常态性能
 app.commandLine.appendSwitch('webrtc-max-cpu-consumption-percentage', '100')
+// Keep this fork's accounts and snapshots separate from upstream WeFlow.
+app.setPath('userData', process.env.WEFLOW_USER_DATA_PATH || join(app.getPath('appData'), 'WeFlow-full'))
 
 // 配置自动更新
 autoUpdater.autoDownload = false
-autoUpdater.autoInstallOnAppQuit = true
+autoUpdater.autoInstallOnAppQuit = false
 autoUpdater.disableDifferentialDownload = true  // 禁用差分更新，强制全量下载
 // 更新通道策略：
 // - 稳定版（如 4.3.0）默认走 latest
@@ -526,10 +529,8 @@ const applyAutoUpdateChannel = (reason: 'startup' | 'settings' = 'startup') => {
 }
 
 applyAutoUpdateChannel('startup')
-const AUTO_UPDATE_ENABLED =
-  process.env.AUTO_UPDATE_ENABLED === 'true' ||
-  process.env.AUTO_UPDATE_ENABLED === '1' ||
-  (process.env.AUTO_UPDATE_ENABLED == null && !process.env.VITE_DEV_SERVER_URL)
+// This fork ships its own backend and must not install upstream binaries over it.
+const AUTO_UPDATE_ENABLED = false
 
 const getLaunchAtStartupUnsupportedReason = (): string | null => {
   if (process.platform !== 'win32' && process.platform !== 'darwin') {
@@ -5393,6 +5394,18 @@ function registerIpcHandlers() {
       return { success: false, error: String(e) }
     }
   })
+
+  ipcMain.handle('integrated:discover', () => integratedClient().call('discover'))
+  ipcMain.handle('integrated:status', (_, dataDir: string) => integratedClient().call('status', { dataDir }))
+  ipcMain.handle('integrated:prepareKeys', (event, dataDir: string) =>
+    integratedClient().call('prepareKeys', { dataDir }, (message) => event.sender.send('integrated:progress', message)))
+  ipcMain.handle('integrated:prepareSnapshot', async (event, dataDir: string) => {
+    const result = await integratedClient().call('createSnapshot', { dataDir },
+      (message) => event.sender.send('integrated:progress', message))
+    if (!result.success) return result
+    return activateIntegratedSnapshot(dataDir)
+  })
+  ipcMain.handle('integrated:activate', (_, dataDir: string) => activateIntegratedSnapshot(dataDir))
 
   // 密钥获取
   ipcMain.handle('key:autoGetDbKey', async (event, dbPath?: string, accountId?: string, internalDbKeyHex?: string) => {

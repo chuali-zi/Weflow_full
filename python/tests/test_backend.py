@@ -1,0 +1,149 @@
+import hashlib
+import json
+import os
+from pathlib import Path
+import sqlite3
+import subprocess
+import sys
+import tempfile
+import unittest
+
+from weflow_backend.backend import Backend
+from wxtext.errors import ToolError
+from wxtext.state import StateStore
+from fixtures import FakeWindows, make_account, install_snapshot, encrypted_account
+
+
+class QueryTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory(dir=os.environ.get('WEFLOW_TEST_TMP'))
+        self.home = Path(self.temp.name)
+        self.root, self.text = make_account(self.home)
+        self.backend = Backend(self.home / 'state', windows=FakeWindows())
+        install_snapshot(self.backend, self.root)
+        self.backend.open(str(self.root.parent))
+
+    def tearDown(self):
+        self.backend.close()
+        self.temp.cleanup()
+
+    def test_shards_zstd_senders_and_large_ids(self):
+        rows = list(self.backend.message_stream('wxid_peer'))
+        self.assertEqual(len(rows), 5)
+        self.assertEqual(rows[0]['server_id'], '9007199254740993')
+        self.assertEqual(rows[0]['computed_is_send'], 1)
+        self.assertEqual(rows[1]['message_content'], self.text)
+        self.assertEqual(rows[1]['sender_username'], 'wxid_peer')
+        self.assertEqual(sum(r['message_content'] == '相同文字' for r in rows), 2)
+        self.assertEqual(self.backend.getMessages('wxid_peer', 2, 1)['messages'][0]['create_time'], 1700000004)
+
+    def test_cursor_exact_boundary_and_range(self):
+        cursor = self.backend.openMessageCursor('wxid_peer', batchSize=2, ascending=True, beginTimestamp=1700000002, endTimestamp=1700000005)['cursor']
+        first = self.backend.fetchMessageBatch(cursor)
+        second = self.backend.fetchMessageBatch(cursor)
+        self.assertTrue(first['hasMore'])
+        self.assertFalse(second['hasMore'])
+        self.assertEqual([len(first['rows']), len(second['rows'])], [2, 2])
+        self.backend.closeMessageCursor(cursor)
+        with self.assertRaises(ToolError):
+            self.backend.fetchMessageBatch(cursor)
+
+    def test_sessions_search_and_stats_contract(self):
+        sessions = self.backend.getSessions()['sessions']
+        self.assertEqual({s['username'] for s in sessions}, {'wxid_peer', '123@chatroom'})
+        hits = self.backend.searchMessages('相同')['messages']
+        self.assertEqual(len(hits), 2)
+        self.assertEqual(hits[0]['_session_id'], 'wxid_peer')
+        types = self.backend.getSessionMessageTypeStats('wxid_peer')['data']
+        self.assertEqual(types['total_messages'], 5)
+        self.assertEqual(types['image_messages'], 1)
+        self.assertEqual(types['first_timestamp'], 1700000001)
+        self.assertEqual(sum(types['date_counts'].values()), 5)
+        group = self.backend.dispatch('getGroupStats', {'chatroomId': '123@chatroom'})['data']
+        self.assertEqual(group['sessions']['123@chatroom']['senders']['wxid_peer'], 2)
+        self.assertEqual(self.backend.dispatch('getAvailableYears', {'sessionIds': ['wxid_peer']})['data'], [2023])
+
+    def test_readonly_sql_and_source_is_never_opened(self):
+        before = {p: hashlib.sha256(p.read_bytes()).digest() for p in self.root.rglob('*.db')}
+        result = self.backend.execQuery('contact', sql='SELECT username FROM contact')
+        self.assertEqual(len(result['rows']), 3)
+        with self.assertRaises(sqlite3.OperationalError):
+            self.backend.execQuery('contact', sql='DELETE FROM contact')
+        self.assertEqual(before, {p: hashlib.sha256(p.read_bytes()).digest() for p in self.root.rglob('*.db')})
+        with self.assertRaises(ToolError):
+            self.backend.dispatch('getGroupMemberCount', {'chatroomId': '123@chatroom'})
+
+    def test_export_raw_stream_and_range(self):
+        output = self.home / 'exports'
+        result = self.backend.exportRaw({'account': {'accountDir': str(self.root.parent)},
+            'outputDir': str(output), 'sessionIds': ['wxid_peer'], 'options': {'dateRange': {'start': 1700000002, 'end': 1700000004}}})
+        path = Path(result['rawSessionOutputPaths']['wxid_peer'])
+        rows = [json.loads(line) for line in path.read_text(encoding='utf-8').splitlines()]
+        self.assertEqual(len(rows), 3)
+        self.assertEqual(rows[0]['message_content'], self.text)
+        self.assertEqual(result['rawExportManifests']['wxid_peer']['rows'], 3)
+        with self.assertRaises(ToolError):
+            self.backend.exportRaw({'account': {'accountDir': str(self.root.parent)}, 'outputDir': str(self.root / 'export'), 'sessionIds': []})
+
+    def test_persistent_stdio_protocol(self):
+        requests = [dict(id=1, method='open', payload={'accountDir': str(self.root.parent)}),
+                    dict(id=2, method='getMessageCount', payload={'sessionId': 'wxid_peer'}),
+                    dict(id=3, method='unknown', payload={})]
+        result = subprocess.run([sys.executable, '-m', 'weflow_backend', '--state-dir', str(self.home / 'state')],
+            input=''.join(json.dumps(r) + '\n' for r in requests), text=True, encoding='utf-8', capture_output=True, check=True)
+        replies = [json.loads(line) for line in result.stdout.splitlines()]
+        self.assertIs(replies[0]['result'], True)
+        self.assertEqual(replies[1]['result']['count'], 5)
+        self.assertEqual(replies[2]['result']['code'], 'FEATURE_UNAVAILABLE')
+        self.assertEqual(result.stderr, '')
+
+
+@unittest.skipUnless(os.name == 'nt', 'Windows native SQLite fixture')
+class PreparationTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory(dir=os.environ.get('WEFLOW_TEST_TMP'))
+        self.home = Path(self.temp.name)
+        self.root, keys, self.text = encrypted_account(self.home)
+        self.windows = FakeWindows(keys)
+        self.backend = Backend(self.home / 'state', windows=self.windows)
+
+    def tearDown(self):
+        self.backend.close()
+        self.temp.cleanup()
+
+    def test_encrypted_preparation_dpapi_reopen_and_source_preserved(self):
+        before = {p: p.read_bytes() for p in self.root.rglob('*.db')}
+        first = self.backend.prepareKeys(str(self.root))
+        self.assertEqual(first['verifiedDatabases'], 3)
+        self.backend.prepareKeys(str(self.root))
+        self.assertEqual(self.windows.acquisitions, 1)
+        sealed = self.backend.state.cache_path(self.root).read_bytes()
+        self.assertNotIn(first['key'].encode(), sealed)
+        self.windows.running = True
+        with self.assertRaisesRegex(ToolError, 'NEED_EXIT'):
+            self.backend.createSnapshot(str(self.root))
+        self.windows.running = False
+        result = self.backend.createSnapshot(str(self.root))
+        self.assertTrue(Path(result['directory']).is_dir())
+        self.backend.open(str(self.root.parent))
+        self.assertEqual(len(list(self.backend.message_stream('wxid_peer'))), 5)
+        self.assertEqual(self.backend.snapshotConfig(str(self.root))['accountId'], 'wxid_me')
+        self.assertEqual(before, {p: p.read_bytes() for p in self.root.rglob('*.db')})
+        self.assertEqual(list(self.backend.state.work_root().iterdir()), [])
+
+    def test_failed_update_keeps_previous_snapshot(self):
+        self.backend.prepareKeys(str(self.root))
+        old = self.backend.createSnapshot(str(self.root))
+        source = self.root / 'message/message_0.db'
+        corrupted = bytearray(source.read_bytes())
+        corrupted[-1] ^= 1
+        source.write_bytes(corrupted)
+        with self.assertRaisesRegex(ToolError, 'PAGE_AUTH_FAILED'):
+            self.backend.createSnapshot(str(self.root))
+        self.assertEqual(self.backend.read_active(self.root)['directory'], old['directory'])
+        self.backend.open(str(self.root.parent))
+        self.assertEqual(self.backend.dispatch('getMessageCount', {'sessionId': 'wxid_peer'})['count'], 5)
+
+
+if __name__ == '__main__':
+    unittest.main()
