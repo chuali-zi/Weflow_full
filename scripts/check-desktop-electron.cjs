@@ -10,6 +10,7 @@ const resources = path.join(root, 'release/win-unpacked/resources');
 const appRoot = packaged ? path.join(resources, 'app.asar') : root;
 if (packaged) {
   assert.ok(fs.existsSync(path.join(resources, 'backend/weflow-backend.exe')));
+  Object.defineProperty(app, 'isPackaged', { value: true });
   Object.defineProperty(process, 'resourcesPath', { value: resources, configurable: true, writable: true });
   process.chdir(path.dirname(resources));
 }
