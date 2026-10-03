@@ -3,12 +3,13 @@ import { app, BrowserWindow, ipcMain, nativeTheme, Tray, Menu, nativeImage, shel
 import { Worker } from 'worker_threads'
 import { fork, type ChildProcess, type ForkOptions } from 'child_process'
 import { createHash, randomUUID } from 'crypto'
-import { join, dirname } from 'path'
+import { join, dirname, resolve } from 'path'
 import { pathToFileURL } from 'url'
 import { autoUpdater } from 'electron-updater'
 import { readFile, writeFile, mkdir, rm, readdir, copyFile } from 'fs/promises'
 import { appendFileSync, existsSync, mkdirSync } from 'fs'
 import { ConfigService } from './services/config'
+import { configurePreparedLaunch } from './services/preparedLaunch'
 import { wcdbService } from './services/wcdbService'
 import { chatService } from './services/chatService'
 import { imageDecryptService } from './services/imageDecryptService'
@@ -66,6 +67,36 @@ function traceKeyFlow(stage: string, data?: unknown): void {
 app.commandLine.appendSwitch('webrtc-max-cpu-consumption-percentage', '100')
 // Keep this fork's accounts and snapshots separate from upstream WeFlow.
 app.setPath('userData', process.env.WEFLOW_USER_DATA_PATH || join(app.getPath('appData'), 'WeFlow-full'))
+
+const preparedConfigureMode = process.argv.includes('--weflow-configure')
+if (preparedConfigureMode) {
+  console.log = () => undefined
+  console.info = () => undefined
+  console.warn = () => undefined
+  console.error = () => undefined
+}
+const getPreparedDataDirArgument = (): string => {
+  for (let index = 0; index < process.argv.length; index += 1) {
+    const value = process.argv[index]
+    if (value === '--data-dir') return String(process.argv[index + 1] || '').trim()
+    if (value.startsWith('--data-dir=')) return value.slice('--data-dir='.length).trim()
+  }
+  return ''
+}
+let preparedConfigureResultWritten = false
+const writePreparedConfigureResult = async (result: Record<string, unknown>): Promise<void> => {
+  if (!preparedConfigureMode || preparedConfigureResultWritten) return
+  preparedConfigureResultWritten = true
+  // Suppress any incidental app logging in bridge mode. Its stdout contract is
+  // exactly one machine-readable line and never contains the database key.
+  console.log = () => undefined
+  console.info = () => undefined
+  console.warn = () => undefined
+  console.error = () => undefined
+  await new Promise<void>((resolve) => {
+    process.stdout.write(`WEFLOW_CLI_RESULT=${JSON.stringify(result)}\n`, () => resolve())
+  })
+}
 
 // 配置自动更新
 autoUpdater.autoDownload = false
@@ -5479,7 +5510,17 @@ function registerIpcHandlers() {
 // 主窗口引用
 let mainWindow: BrowserWindow | null = null
 const hasSingleInstanceLock = app.requestSingleInstanceLock()
-if (!hasSingleInstanceLock) app.quit()
+if (!hasSingleInstanceLock) {
+  if (preparedConfigureMode) {
+    void writePreparedConfigureResult({
+      success: false,
+      code: 'GUI_RUNNING',
+      error: '此 WeFlow 配置已在 GUI 中运行，请关闭该窗口后重试。'
+    }).finally(() => app.quit())
+  } else {
+    app.quit()
+  }
+}
 app.on('second-instance', () => {
   if (!mainWindow || mainWindow.isDestroyed()) return
   if (mainWindow.isMinimized()) mainWindow.restore()
@@ -5526,6 +5567,42 @@ function checkForUpdatesOnStartup() {
 
 app.whenReady().then(async () => {
   if (!hasSingleInstanceLock) return
+  if (preparedConfigureMode) {
+    let result: Record<string, unknown>
+    try {
+      const dataDir = getPreparedDataDirArgument()
+      if (!dataDir) {
+        result = { success: false, code: 'INVALID_ARGUMENT', error: '缺少 --data-dir <db_storage> 参数。' }
+      } else {
+        const userDataPath = app.getPath('userData')
+        const configCwd = String(process.env.WEFLOW_CONFIG_CWD || '').trim()
+        const normalizeProfilePath = (value: string) => {
+          const absolute = resolve(value)
+          return process.platform === 'win32' ? absolute.toLowerCase() : absolute
+        }
+        if (configCwd && normalizeProfilePath(configCwd) !== normalizeProfilePath(userDataPath)) {
+          result = { success: false, code: 'PROFILE_PATH_MISMATCH', error: 'WEFLOW_USER_DATA_PATH 与 WEFLOW_CONFIG_CWD 必须指向同一 profile。' }
+        } else {
+          configService = new ConfigService()
+          const candidateResources = app.isPackaged
+            ? join(process.resourcesPath, 'resources')
+            : join(app.getAppPath(), 'resources')
+          const fallbackResources = join(process.cwd(), 'resources')
+          const resourcesPath = existsSync(candidateResources) ? candidateResources : fallbackResources
+          result = await configurePreparedLaunch(configService, userDataPath, resourcesPath, dataDir)
+        }
+      }
+    } catch (error) {
+      result = {
+        success: false,
+        code: 'PREPARE_FAILED',
+        error: error instanceof Error ? error.message.replace(/[a-f\d]{64}/gi, '[已隐藏]') : 'WeFlow CLI 准备失败。'
+      }
+    }
+    await writePreparedConfigureResult(result)
+    app.quit()
+    return
+  }
   // 先初始化配置，以便在启动早期判定是否需要静默启动
   configService = new ConfigService()
   applyAutoUpdateChannel('startup')

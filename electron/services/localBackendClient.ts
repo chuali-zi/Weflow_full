@@ -100,4 +100,20 @@ export class LocalBackendClient {
       timer.unref()
     }
   }
+
+  /** End the JSON-RPC stream and wait for the backend to exit without killing it. */
+  async closeGracefully(): Promise<void> {
+    const child = this.child
+    if (!child) return
+    if (!child.stdin.destroyed && !child.stdin.writableEnded) child.stdin.end()
+    if (child.exitCode !== null || child.signalCode !== null) return
+
+    await new Promise<void>((resolvePromise) => {
+      const done = () => resolvePromise()
+      child.once('exit', done)
+      child.once('close', done)
+      // Cover exit between the initial state check and listener registration.
+      if (child.exitCode !== null || child.signalCode !== null) done()
+    })
+  }
 }

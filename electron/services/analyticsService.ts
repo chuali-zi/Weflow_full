@@ -1,7 +1,7 @@
 import { ConfigService } from './config'
 import { wcdbService } from './wcdbService'
-import { join } from 'path'
-import { readFile, writeFile, rename, rm } from 'fs/promises'
+import { join, dirname } from 'path'
+import { readFile, writeFile, rename, rm, mkdir } from 'fs/promises'
 import { app } from 'electron'
 import { createHash } from 'crypto'
 import { buildStableAccountCacheScope } from './contactCacheService'
@@ -560,7 +560,8 @@ class AnalyticsService {
   }
 
   private getCacheFilePath(): string {
-    return join(app.getPath('documents'), 'WeFlow', 'analytics_cache.json')
+    const configured = String(this.configService.get('cachePath') || '').trim()
+    return join(configured || join(app.getPath('userData'), 'cache'), 'analytics_cache.json')
   }
 
   private runCacheFileMutation<T>(operation: () => Promise<T>): Promise<T> {
@@ -588,6 +589,7 @@ class AnalyticsService {
       const cachePath = this.getCacheFilePath()
       const temporaryPath = `${cachePath}.${process.pid}.${++this.cacheFileMutationSequence}.tmp`
       try {
+        await mkdir(dirname(cachePath), { recursive: true })
         await writeFile(temporaryPath, JSON.stringify(data))
         if (!this.isCacheEpochCurrent(expectedEpoch)) {
           await rm(temporaryPath, { force: true })

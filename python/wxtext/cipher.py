@@ -3,6 +3,7 @@ from dataclasses import dataclass, field
 import hashlib
 import hmac
 from pathlib import Path
+import re
 import sqlite3
 import struct
 
@@ -90,6 +91,90 @@ def open_readonly(path: Path) -> sqlite3.Connection:
     return connection
 
 
+_FTS5_DECLARATION = re.compile(r"\bUSING\s+fts5\s*\(.*\)", re.IGNORECASE | re.DOTALL)
+_FTS5_TOKENIZER = re.compile(r"\btokenize\s*=\s*(['\"])(.*?)\1", re.IGNORECASE | re.DOTALL)
+
+
+def verify_database_integrity(path: Path) -> dict:
+    """Check SQLite integrity, reporting a narrow fallback for unavailable FTS tokenizers.
+
+    WeChat's FTS5 tables can use a tokenizer registered only by its WCDB build.
+    SQLite still authenticates/decrypts every page here, and its own B-tree
+    checks remain mandatory; only virtual-table semantic checks requiring the
+    proven-missing tokenizer are reported as unavailable.
+    """
+    connection = open_readonly(Path(path))
+    try:
+        table_rows = list(connection.execute(
+            "SELECT name, sql FROM sqlite_master WHERE type='table' ORDER BY name"))
+        try:
+            rows = [row[0] for row in connection.execute("PRAGMA integrity_check")]
+        except sqlite3.OperationalError as error:
+            if str(error).casefold() != "sql logic error":
+                raise
+            virtual = {}
+            for name, sql in table_rows:
+                if not sql or not _FTS5_DECLARATION.search(sql):
+                    continue
+                match = _FTS5_TOKENIZER.search(sql)
+                if not match:
+                    continue
+                specification = match.group(2)
+                tokenizer = specification.split()[0] if specification.split() else ""
+                if tokenizer:
+                    virtual[name] = (tokenizer, specification)
+            if not virtual:
+                raise
+
+            missing = {}
+            probe = sqlite3.connect(":memory:")
+            try:
+                for index, (name, (tokenizer, specification)) in enumerate(virtual.items()):
+                    escaped = specification.replace("'", "''")
+                    probe_name = f"__weflow_tokenizer_probe_{index}"
+                    try:
+                        probe.execute(
+                            f'CREATE VIRTUAL TABLE "{probe_name}" '
+                            f"USING fts5(value, tokenize='{escaped}')")
+                    except sqlite3.OperationalError as probe_error:
+                        if str(probe_error).casefold() == f"no such tokenizer: {tokenizer}".casefold():
+                            missing[name] = tokenizer
+                            continue
+                        raise error
+            finally:
+                probe.close()
+            if not missing:
+                raise
+
+            checked = 0
+            skipped_virtual = []
+            for name, sql in table_rows:
+                escaped_name = name.replace('"', '""')
+                try:
+                    check = [row[0] for row in connection.execute(
+                        f'PRAGMA integrity_check("{escaped_name}")')]
+                except sqlite3.OperationalError as table_error:
+                    if name in missing and str(table_error).casefold() == "sql logic error":
+                        skipped_virtual.append(name)
+                        continue
+                    raise
+                if check != ["ok"]:
+                    raise ToolError("INTEGRITY_FAILED", "SQLite 表完整性检查失败。",
+                                    details={"table": name, "result_count": len(check)})
+                checked += 1
+            return {"status": "limited_custom_fts", "check": "all_btree_tables",
+                    "tables_checked": checked,
+                    "fts_tables_skipped": sorted(skipped_virtual),
+                    "missing_tokenizers": sorted(set(missing.values()))}
+
+        if rows != ["ok"]:
+            raise ToolError("INTEGRITY_FAILED", "SQLite 完整性检查失败。",
+                            details={"result_count": len(rows)})
+        return {"status": "ok", "check": "integrity_check", "tables_checked": len(table_rows)}
+    finally:
+        connection.close()
+
+
 def _is_utf8(value: bytes) -> bool:
     try:
         value.decode("utf-8")
@@ -111,14 +196,7 @@ def decrypt_database(source: Path, output: Path, key: DatabaseKey) -> None:
             created = True
             for number in range(1, size // PROFILE.page_size + 1):
                 outgoing.write(decoder.decrypt(incoming.read(PROFILE.page_size), number))
-        connection = open_readonly(output)
-        try:
-            check = [row[0] for row in connection.execute("PRAGMA integrity_check")]
-            if check != ["ok"]:
-                # SQLite errors may contain cell contents: do not log their text.
-                raise ToolError("INTEGRITY_FAILED", "解密后的数据库未通过完整性检查。")
-        finally:
-            connection.close()
+        verify_database_integrity(output)
     except BaseException:
         if created:
             output.unlink(missing_ok=True)

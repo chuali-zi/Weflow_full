@@ -14,6 +14,7 @@
   "//": "二改不应改变此处的作者与应用信息",
   "scripts": {
     "start": "node scripts/start.cjs",
+    "cli": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/cli.ps1",
     "build:app": "npm run typecheck && node scripts/clean-dist-electron.cjs && vite build",
     "package:win": "node scripts/package-backend.cjs && npm run build:app && electron-builder --win --x64 --publish never",
     "test:backend": "node scripts/test-backend.cjs",
@@ -141,6 +142,10 @@
       ],
       "icon": "public/icon.ico",
       "extraFiles": [
+        {
+          "from": "weflow.cmd",
+          "to": "weflow.cmd"
+        },
         {
           "from": "resources/runtime/win32/msvcp140.dll",
           "to": "."

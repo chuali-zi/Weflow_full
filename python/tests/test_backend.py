@@ -15,7 +15,7 @@ from wxtext.state import StateStore
 from wxtext.windows import parse_config_paths
 from fixtures import FakeWindows, make_account, install_snapshot, encrypted_account, encrypt_fixture
 from wxtext.adapter import message_table
-from wxtext.cipher import decrypt_database
+from wxtext.cipher import decrypt_database, verify_database_integrity
 
 
 class QueryTests(unittest.TestCase):
@@ -115,6 +115,27 @@ class QueryTests(unittest.TestCase):
         keyed = parse_config_paths('DataDir=D:\\wechat\r\n'.encode('utf-16'))
         self.assertEqual([str(path) for path in bare], ['D:\\wechat'])
         self.assertEqual([str(path) for path in keyed], ['D:\\wechat'])
+
+    def test_integrity_check_limits_only_verified_missing_custom_fts_tokenizer(self):
+        regular = verify_database_integrity(self.root / 'contact/contact.db')
+        self.assertEqual(regular['status'], 'ok')
+
+        path = self.home / 'custom-fts.db'
+        connection = sqlite3.connect(path)
+        connection.execute('CREATE VIRTUAL TABLE fts_probe USING fts5(value)')
+        connection.execute("INSERT INTO fts_probe(value) VALUES('synthetic fixture text')")
+        connection.execute('PRAGMA writable_schema=ON')
+        connection.execute("UPDATE sqlite_master SET sql=? WHERE name='fts_probe'",
+                           ("CREATE VIRTUAL TABLE fts_probe USING fts5(value, tokenize='MMFtsTokenizer disable_pinyin')",))
+        connection.execute('PRAGMA writable_schema=OFF')
+        connection.commit()
+        connection.close()
+
+        limited = verify_database_integrity(path)
+        self.assertEqual(limited['status'], 'limited_custom_fts')
+        self.assertEqual(limited['check'], 'all_btree_tables')
+        self.assertEqual(limited['fts_tables_skipped'], ['fts_probe'])
+        self.assertGreater(limited['tables_checked'], 0)
 
     def test_account_root_without_argument_uses_records(self):
         with patch('weflow_backend.backend.discover_data_dir_records',

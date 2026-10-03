@@ -33,6 +33,9 @@ def serve(state_dir):
 
 
 def main():
+    if len(sys.argv) > 1 and sys.argv[1] == 'cli':
+        from .cli import main as cli_main
+        raise SystemExit(cli_main(sys.argv[2:]))
     for stream in (sys.stdin, sys.stdout, sys.stderr):
         if hasattr(stream, "reconfigure"):
             stream.reconfigure(encoding="utf-8")
