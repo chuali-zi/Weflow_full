@@ -1,7 +1,6 @@
 import { useEffect, useRef } from 'react'
 import { useChatStore } from '../stores/chatStore'
 import type { ChatSession, Message } from '../types/models'
-import { buildNewMessagesCursor } from '../pages/Chat/messageCursor'
 import { displayNameOrFallback, pickDisplayName } from '../utils/displayName'
 
 const hasSessionListEntryChanged = (previous: ChatSession | undefined, next: ChatSession): boolean => {
@@ -16,10 +15,15 @@ export function GlobalSessionMonitor() {
     const {
         sessions,
         setSessions,
-        appendMessages
+        setMessages,
+        setDatabaseStatus,
+        setConnectionError
     } = useChatStore()
 
     const sessionsRef = useRef(sessions)
+    const connectionIdRef = useRef<string | null>(null)
+    const revisionRef = useRef<number>(-1)
+    const refreshGenerationRef = useRef(0)
     // 保持 ref 同步
     useEffect(() => {
         sessionsRef.current = sessions
@@ -34,6 +38,9 @@ export function GlobalSessionMonitor() {
     // 处理数据库变更（防抖 + 串行：同步期间 Session 表变更事件会连续触发，
     // 每次全量 getSessions + 富化的 IPC 成本高，合并突发事件只刷新一次）
     useEffect(() => {
+        void window.electronAPI.wcdb.getConnectionStatus?.().then((status) => {
+            if (status && typeof status === 'object') setDatabaseStatus(status)
+        }).catch(() => undefined)
         let debounceTimer: ReturnType<typeof setTimeout> | null = null
         let refreshing = false
         let pendingRefresh = false
@@ -44,8 +51,10 @@ export function GlobalSessionMonitor() {
                 return
             }
             refreshing = true
+            const generation = ++refreshGenerationRef.current
+            const connectionAtStart = connectionIdRef.current
             try {
-                await refreshSessions()
+                await refreshSessions(generation, connectionAtStart)
             } finally {
                 refreshing = false
                 if (pendingRefresh) {
@@ -58,10 +67,17 @@ export function GlobalSessionMonitor() {
         const handleDbChange = (_event: any, data: { type: string; json: string }) => {
             try {
                 const payload = JSON.parse(data.json)
+                const connectionId = String(payload.connectionId || '').trim()
+                const revision = Number(payload.revision)
+                if (connectionId && connectionIdRef.current && connectionId !== connectionIdRef.current) return
+                if (connectionId && !connectionIdRef.current) connectionIdRef.current = connectionId
+                if (connectionId && connectionId === connectionIdRef.current && Number.isFinite(revision) && revision <= revisionRef.current) return
+                if (connectionId && Number.isFinite(revision)) revisionRef.current = revision
                 const tableName = payload.table
 
-                // 只关注 Session 表
-                if (tableName === 'Session' || tableName === 'session') {
+                // Live change is account scoped in the first backend version. Refresh
+                // sessions for every change so same-second edits/deletes are visible.
+                if (data.type === 'change' || tableName === 'Session' || tableName === 'session') {
                     if (debounceTimer) clearTimeout(debounceTimer)
                     debounceTimer = setTimeout(() => {
                         debounceTimer = null
@@ -75,9 +91,26 @@ export function GlobalSessionMonitor() {
 
         if (window.electronAPI.chat.onWcdbChange) {
             const removeListener = window.electronAPI.chat.onWcdbChange(handleDbChange)
+            const removeStatus = window.electronAPI.chat.onDatabaseStatus?.((status) => {
+                const nextConnectionId = String(status?.connectionId || '').trim()
+                if (nextConnectionId && connectionIdRef.current && nextConnectionId !== connectionIdRef.current) {
+                    revisionRef.current = -1
+                    refreshGenerationRef.current += 1
+                }
+                if (nextConnectionId) connectionIdRef.current = nextConnectionId
+                const nextRevision = Number(status?.revision)
+                if (Number.isFinite(nextRevision)) revisionRef.current = nextRevision
+                setDatabaseStatus(status)
+                const state = String(status?.state || '').toLowerCase()
+                if (state === 'ready' || state === 'connected') setConnectionError(null)
+                else if (state === 'reconnecting' || state === 'needs_key' || state === 'degraded' || state === 'error' || state === 'disconnected') {
+                    setConnectionError(String(status?.message || status?.error || `数据库状态：${state}`))
+                }
+            })
             return () => {
                 if (debounceTimer) clearTimeout(debounceTimer)
                 removeListener()
+                removeStatus?.()
             }
         }
         return () => { }
@@ -88,9 +121,14 @@ export function GlobalSessionMonitor() {
     // 导出页打开时按需拉取可见批次的会话统计，主进程有磁盘缓存兜底，响应速度足够快。
 
 
-    const refreshSessions = async () => {
+    const refreshSessions = async (generationAtStart?: number, connectionAtStart?: string | null) => {
         try {
             const result = await window.electronAPI.chat.getSessions()
+            const isCurrent = () => (
+                (generationAtStart === undefined || refreshGenerationRef.current === generationAtStart) &&
+                (!connectionAtStart || connectionIdRef.current === connectionAtStart)
+            )
+            if (!isCurrent()) return
             if (result.success && result.sessions && Array.isArray(result.sessions)) {
                 let newSessions = result.sessions as ChatSession[]
                 const oldSessions = sessionsRef.current
@@ -109,6 +147,7 @@ export function GlobalSessionMonitor() {
                             const refreshed = await window.electronAPI.chat.refreshSessionContactDisplayNames(
                                 changedSessions.map(session => session.username)
                             )
+                            if (!isCurrent()) return
                             if (refreshed.success && refreshed.contacts) {
                                 for (const session of changedSessions) {
                                     const displayName = pickDisplayName(refreshed.contacts[session.username]?.displayName)
@@ -135,6 +174,7 @@ export function GlobalSessionMonitor() {
                 checkForNewMessages(oldSessions, newSessions)
 
                 // 2. 更新 store
+                if (!isCurrent()) return
                 setSessions(newSessions)
                 sessionsRef.current = newSessions
 
@@ -148,8 +188,10 @@ export function GlobalSessionMonitor() {
                     const currentSessionNew = newSessions.find(s => s.username === currentId)
                     const currentSessionOld = oldSessions.find(s => s.username === currentId)
 
-                    if (currentSessionNew && (!currentSessionOld || currentSessionNew.lastTimestamp > currentSessionOld.lastTimestamp)) {
-                        void handleActiveSessionRefresh(currentId)
+                    // Account-scoped live commits can edit/delete older rows
+                    // without changing the session's last-message summary.
+                    if (connectionAtStart || (currentSessionNew && (!currentSessionOld || hasSessionListEntryChanged(currentSessionOld, currentSessionNew)))) {
+                        await handleActiveSessionRefresh(currentId, generationAtStart, connectionAtStart)
                     }
                 }
             }
@@ -339,28 +381,56 @@ export function GlobalSessionMonitor() {
         }
     }
 
-    const handleActiveSessionRefresh = async (sessionId: string) => {
-        // 从 ChatPage 复制/调整的逻辑，以保持集中
+    const handleActiveSessionRefresh = async (sessionId: string, generationAtStart?: number, connectionAtStart?: string | null) => {
         const state = useChatStore.getState()
         const msgs = state.messages || []
-        const lastMsg = msgs[msgs.length - 1]
-        const minTime = lastMsg?.createTime || 0
-
+        const messageList = document.querySelector('.message-list') as HTMLElement | null
+        const listRect = messageList?.getBoundingClientRect()
+        const firstVisible = listRect ? Array.from(messageList!.querySelectorAll<HTMLElement>('.message-wrapper')).find((element) => {
+            const rect = element.getBoundingClientRect()
+            return rect.bottom > listRect.top && rect.top < listRect.bottom
+        }) : undefined
+        const anchorKey = firstVisible?.getAttribute('data-message-key') || ''
+        const anchorIndex = anchorKey ? msgs.findIndex((message) => getMessageKey(message) === anchorKey) : 0
+        const anchorRect = firstVisible?.getBoundingClientRect()
+        const anchorOffset = listRect && anchorRect ? anchorRect.top - listRect.top : 0
+        const distanceFromBottom = messageList
+          ? messageList.scrollHeight - messageList.scrollTop - messageList.clientHeight
+          : 0
+        const preserveAnchor = Boolean(firstVisible && distanceFromBottom > 180)
         try {
-            const cursor = buildNewMessagesCursor(lastMsg)
-            const result = await window.electronAPI.chat.getNewMessages(
+            const hasHistoricalWindow = msgs.length > 0 && (state.hasMoreLater || preserveAnchor)
+            const firstMessage = msgs[0]
+            const lastMessage = msgs[msgs.length - 1]
+            const result = hasHistoricalWindow
+              ? await window.electronAPI.chat.getMessages(
                 sessionId,
-                Math.max(0, minTime - 1),
-                120,
-                cursor
-            )
-            if (result.success && result.messages && result.messages.length > 0) {
-                const latestMessages = useChatStore.getState().messages || []
-                const existingKeys = new Set(latestMessages.map(getMessageKey))
-                const newMessages = result.messages.filter((msg: Message) => !existingKeys.has(getMessageKey(msg)))
-                if (newMessages.length > 0) {
-                    appendMessages(newMessages, false)
+                0,
+                Math.max(120, msgs.length * 2),
+                firstMessage.createTime,
+                lastMessage.createTime,
+                true
+              )
+              : await window.electronAPI.chat.getLatestMessages(sessionId, Math.max(50, msgs.length || 50))
+            const sameRefresh = (generationAtStart === undefined || refreshGenerationRef.current === generationAtStart) &&
+              (!connectionAtStart || connectionIdRef.current === connectionAtStart)
+            if (sameRefresh && result.success && Array.isArray(result.messages) && useChatStore.getState().currentSessionId === sessionId) {
+                const incoming = result.messages as Message[]
+                let nextMessages = incoming
+                if (hasHistoricalWindow && result.hasMore === true) {
+                    // The range was truncated. Merge rows into the existing window
+                    // so the refresh cannot discard an older boundary.
+                    const incomingByKey = new Map(incoming.map((message) => [getMessageKey(message), message]))
+                    nextMessages = msgs.map((message) => incomingByKey.get(getMessageKey(message)) || message)
+                    const existingKeys = new Set(nextMessages.map(getMessageKey))
+                    nextMessages.push(...incoming.filter((message) => !existingKeys.has(getMessageKey(message))))
                 }
+                // Tell the page before replacing rows, so its message-growth
+                // effect cannot pull a historical window back to the bottom.
+                window.dispatchEvent(new CustomEvent('chat:restore-live-anchor', {
+                    detail: { sessionId, messageKey: anchorKey, index: anchorIndex, offset: anchorOffset, bottom: !preserveAnchor && !state.hasMoreLater }
+                }))
+                setMessages(nextMessages)
             }
         } catch (e) {
             console.warn('后台活跃会话刷新失败:', e)

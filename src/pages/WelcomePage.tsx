@@ -75,6 +75,7 @@ function WelcomePage({ standalone = false }: WelcomePageProps) {
   const [imageAesKey, setImageAesKey] = useState('')
   const [cachePath, setCachePath] = useState('')
   const [accountId, setAccountId] = useState('')
+  const [databaseMode, setDatabaseMode] = useState<'snapshot' | 'live'>('snapshot')
   const [error, setError] = useState('')
   const [isConnecting, setIsConnecting] = useState(false)
   const [isFetchingDbKey, setIsFetchingDbKey] = useState(false)
@@ -186,6 +187,16 @@ function WelcomePage({ standalone = false }: WelcomePageProps) {
       navigate('/home')
     }
   }, [isDbConnected, standalone, navigate])
+
+  useEffect(() => {
+    let cancelled = false
+    void window.electronAPI.wcdb.getConnectionStatus().then((status) => {
+      if (!cancelled && (status?.mode === 'live' || status?.mode === 'snapshot')) {
+        setDatabaseMode(status.mode)
+      }
+    }).catch(() => undefined)
+    return () => { cancelled = true }
+  }, [])
 
   useEffect(() => {
     const preserveAcquiredKey = preserveAcquiredKeyOnPathChangeRef.current
@@ -648,7 +659,8 @@ function WelcomePage({ standalone = false }: WelcomePageProps) {
     setLoading(true, '正在连接数据库...')
 
     try {
-      const result = await window.electronAPI.wcdb.testConnection(dbPath, decryptKey, accountId)
+      const configuredExternalLib = Boolean((await configService.getWcdbLibPath()).trim())
+      const result = await window.electronAPI.wcdb.testConnection(dbPath, decryptKey, accountId, configuredExternalLib ? undefined : databaseMode)
       if (!result.success) {
         const errorMessage = result.error || 'WCDB 连接失败'
         if (errorMessage.includes('-3001')) {
@@ -665,6 +677,15 @@ function WelcomePage({ standalone = false }: WelcomePageProps) {
         }
         setLoading(false)
         return
+      }
+
+      if (!configuredExternalLib) {
+        const modeResult = await window.electronAPI.wcdb.setReadMode(dbPath, accountId, databaseMode)
+        if (!modeResult?.success) {
+          setError(modeResult?.error || '数据读取方式验证失败')
+          setLoading(false)
+          return
+        }
       }
 
       await configService.setDbPath(dbPath)
@@ -850,7 +871,20 @@ function WelcomePage({ standalone = false }: WelcomePageProps) {
           <div className="content-body">
             {currentStep.id === 'intro' && (
               <div className="intro-block">
-                {/* 内容移至底部 */}
+                <div className="form-group">
+                  <label className="field-label">数据读取方式</label>
+                  <div className="field-hint">在线读取支持微信运行时自动更新；离线副本需要在目标应用退出后准备。</div>
+                  <div className="mode-choice-row" role="radiogroup" aria-label="数据读取方式">
+                    <label className={`mode-choice ${databaseMode === 'live' ? 'selected' : ''}`}>
+                      <input type="radio" name="database-mode" checked={databaseMode === 'live'} onChange={() => setDatabaseMode('live')} />
+                      <span><strong>在线读取</strong><small>实时检测数据库提交并刷新聊天</small></span>
+                    </label>
+                    <label className={`mode-choice ${databaseMode === 'snapshot' ? 'selected' : ''}`}>
+                      <input type="radio" name="database-mode" checked={databaseMode === 'snapshot'} onChange={() => setDatabaseMode('snapshot')} />
+                      <span><strong>离线副本</strong><small>使用稳定的本地解密副本</small></span>
+                    </label>
+                  </div>
+                </div>
               </div>
             )}
 

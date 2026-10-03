@@ -5,6 +5,7 @@ import { LocalBackendClient } from './localBackendClient'
 
 type BridgeResult = {
   success: boolean
+  mode?: 'snapshot' | 'live'
   code?: string
   error?: string
   action?: string
@@ -36,7 +37,8 @@ export async function configurePreparedLaunch(
   config: ConfigService,
   userDataPath: string,
   resourcesPath: string,
-  requestedDataDir: string
+  requestedDataDir: string,
+  requestedMode: 'snapshot' | 'live' = 'snapshot'
 ): Promise<BridgeResult> {
   let backend: LocalBackendClient | null = null
   try {
@@ -44,26 +46,30 @@ export async function configurePreparedLaunch(
       return { success: false, code: 'PROFILE_LOCKED', error: '此 WeFlow 配置启用了应用锁，命令行无法继承 GUI 的解锁状态。请使用独立的 --user-data 配置目录，或在原 GUI 设置中关闭应用锁后重试。' }
     }
     const dataDir = cleanDataDir(requestedDataDir)
+    const mode = requestedMode === 'live' ? 'live' : 'snapshot'
     backend = new LocalBackendClient(join(userDataPath, 'backend'), resourcesPath)
-    const snapshot = await backend.call<any>('snapshotConfig', { dataDir })
-    if (!snapshot?.success) return failure(snapshot, '没有找到已准备的聊天记录副本。')
-    const accountId = String(snapshot.accountId || '').trim()
-    const decryptKey = String(snapshot.key || '').trim()
-    const dbPath = String(snapshot.dbPath || '').trim()
-    if (!accountId || !/^[a-f\d]{64}$/i.test(decryptKey) || !dbPath) {
-      return { success: false, code: 'SNAPSHOT_CONFIG_INVALID', error: '记录副本缺少有效的账号、密钥或数据根目录。' }
+    // connectionConfig is deliberately an internal bridge. Its key is only
+    // consumed here and is never returned by the CLI.
+    const connection = await backend.call<any>(mode === 'live' ? 'connectionConfig' : 'snapshotConfig', { dataDir, mode })
+    if (!connection?.success) return failure(connection, mode === 'live' ? '没有找到可用的在线数据库连接。' : '没有找到已准备的聊天记录副本。')
+    const accountId = String(connection.accountId || '').trim()
+    const decryptKey = String(connection.key || connection.decryptKey || '').trim()
+    const dbPath = String(connection.dbPath || '').trim()
+    if (!accountId || !dbPath || !/^[a-f\d]{64}$/i.test(decryptKey)) {
+      return { success: false, code: mode === 'live' ? 'CONNECTION_CONFIG_INVALID' : 'SNAPSHOT_CONFIG_INVALID',
+        error: mode === 'live' ? '在线连接缺少有效的账号、密钥或数据根目录。' : '记录副本缺少有效的账号、密钥或数据根目录。' }
     }
 
-    const opened = await backend.call<any>('open', { accountDir: dataDir })
-    if (opened !== true) {
+    const opened = await backend.call<any>('open', { accountDir: dataDir, mode, ...(decryptKey ? { hexKey: decryptKey } : {}) })
+    if (opened !== true && !(opened && typeof opened === 'object' && opened.success === true)) {
       if (opened && typeof opened === 'object' && opened.success === false) {
-        return failure(opened, '无法打开已准备的聊天记录副本。')
+        return failure(opened, mode === 'live' ? '无法打开在线数据库连接。' : '无法打开已准备的聊天记录副本。')
       }
       const initError = await backend.call<any>('getLastInitError').catch(() => null)
       return failure(typeof initError === 'string' ? { code: 'OPEN_FAILED', error: initError } : opened,
-        '无法打开已准备的聊天记录副本。')
+        mode === 'live' ? '无法打开在线数据库连接。' : '无法打开已准备的聊天记录副本。')
     }
-    const sessions = await backend.call<any>('getSessions')
+    const sessions = await backend.call<any>('getSessions', { mode })
     if (!sessions?.success || !Array.isArray(sessions.sessions)) {
       return failure(sessions, '聊天会话验证失败。')
     }
@@ -78,6 +84,8 @@ export async function configurePreparedLaunch(
     const accountConfigs = config.get('accountConfigs') || {}
     const previousAccountConfig = accountConfigs[accountId] || {}
     config.set('dbPath', dbPath)
+    // Keep the authenticated contact key inside the existing ConfigService
+    // bridge; it is never returned in the CLI result.
     config.set('decryptKey', decryptKey)
     config.set('myAccountId', accountId)
     config.set('accountConfigs', {
@@ -88,7 +96,14 @@ export async function configurePreparedLaunch(
     config.set('keyProviderPath', '')
     config.set('onboardingDone', true)
 
-    return { success: true, code: 'CONFIGURED', dataDir, dbPath, accountId, sessionCount: sessions.sessions.length }
+    // Persist the selected mode only after every ConfigService write above
+    // succeeds. A failed bridge must leave the previous mode untouched.
+    const modeResult = await backend.call<any>('setReadMode', { dataDir, mode })
+    if (modeResult && typeof modeResult === 'object' && modeResult.success === false) {
+      return failure(modeResult, mode === 'live' ? '在线读取模式验证失败。' : '离线读取模式验证失败。')
+    }
+
+    return { success: true, code: 'CONFIGURED', mode, dataDir, dbPath, accountId, sessionCount: sessions.sessions.length }
   } catch (error) {
     return failure({ code: 'PREPARE_FAILED', error: error instanceof Error ? error.message : String(error) })
   } finally {

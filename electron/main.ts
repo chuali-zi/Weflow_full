@@ -3545,22 +3545,41 @@ function registerIpcHandlers() {
   })
 
   // WCDB 数据库相关
-  ipcMain.handle('wcdb:testConnection', async (_, dbPath: string, hexKey: string, accountId: string) => {
+  ipcMain.handle('wcdb:testConnection', async (_, dbPath: string, hexKey: string, accountId: string, mode?: 'snapshot' | 'live') => {
     const cfg = configService || new ConfigService()
     const accountDir = cfg.getAccountDir(dbPath, accountId)
     if (!accountDir) {
       return { success: false, error: '未找到账号目录' }
     }
-    return wcdbService.testConnection(accountDir, hexKey)
+    return wcdbService.testConnection(accountDir, hexKey, mode)
   })
 
-  ipcMain.handle('wcdb:open', async (_, dbPath: string, hexKey: string, accountId: string) => {
+  ipcMain.handle('wcdb:open', async (_, dbPath: string, hexKey: string, accountId: string, mode?: 'snapshot' | 'live') => {
     const cfg = configService || new ConfigService()
     const accountDir = cfg.getAccountDir(dbPath, accountId)
     if (!accountDir) {
       return false
     }
-    return wcdbService.open(accountDir, hexKey)
+    return wcdbService.open(accountDir, hexKey, mode)
+  })
+
+  ipcMain.handle('wcdb:getConnectionStatus', async () => {
+    try { return await wcdbService.getConnectionStatus() }
+    catch (error) { return { state: 'error', code: 'BACKEND_TRANSPORT_ERROR', error: String(error) } }
+  })
+
+  ipcMain.handle('wcdb:setReadMode', async (_, dataDirOrDbPath: string, modeOrAccountId: string, maybeMode?: 'snapshot' | 'live') => {
+    const mode = maybeMode || modeOrAccountId as 'snapshot' | 'live'
+    if (mode !== 'snapshot' && mode !== 'live') return { success: false, error: '读取模式无效' }
+    let dataDir = dataDirOrDbPath
+    if (maybeMode) {
+      const cfg = configService || new ConfigService()
+      dataDir = cfg.getAccountDir(dataDirOrDbPath, modeOrAccountId) || ''
+    }
+    if (!dataDir) return { success: false, error: '未找到账号目录' }
+    const result = await wcdbService.setReadMode(dataDir, mode)
+    if (result?.success) chatService.setReadMode(mode)
+    return result
   })
 
   ipcMain.handle('wcdb:close', async () => {

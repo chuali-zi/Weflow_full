@@ -10,11 +10,18 @@
 | [CLI 使用说明](cli.md) | 命令、参数、输出和退出码。 |
 | [本地解密接入说明](integrated-backend.md) | 密钥认证、快照、原 WeFlow 接口接入位置、验证结果和当前能力范围。 |
 | [wxtext 架构](wxtext-architecture.md) | 密钥扫描、SQLCipher、WAL 与后端实现的技术说明。 |
+| [在线读取实验](online-read-experiment.md) | 微信运行时读取加密库的实测依据与验证边界。 |
+| [在线读取新架构](live-architecture.md) | SQLCipher 在线连接、短事务、监控调度与 GUI 的实现架构。 |
+| [热加载接入规格](live-spec.md) | 模式、CLI / RPC / 事件、恢复与验收契约。 |
+| [完整接入方案](live-integration-plan.md) | 对应当前文件的改动清单、交付阶段与安装包验证。 |
+| [热加载验证](live-validation.md) | 当前测试结果、复现命令和未完成的真实 / 安装验收。 |
 | [第三方组件](third-party-components.md) | 依赖与第三方组件说明。 |
 | [HTTP API](HTTP-API.md) | 上游 HTTP API 的参考文档；其接口与本分支 CLI 是不同入口。 |
 | [上游 README](../README.upstream.md) | 保留的上游介绍及作者信息，下载与功能说明对应上游版本。 |
 
 ## 代码与入口
+
+正式 CLI / GUI 支持 snapshot 离线副本与 live 在线读取。在线接入按“新架构 → 接入规格 → 实施方案”阅读，已执行的测试以热加载验证为准。旧配置默认 snapshot，需要显式选择 live。
 
 | 位置 | 职责 |
 | --- | --- |
@@ -44,6 +51,12 @@ npm run test:backend
 
 # 类型检查和应用构建
 npm run build:app
+
+# 在线提交经过后端、Worker 和真实聊天页的合成测试
+npm run check:live
+
+# 构建 win-unpacked 后验证包内后端和 GUI
+npm run check:live -- --packaged
 
 # 冻结后端并生成 Windows 安装包
 npm run package:win

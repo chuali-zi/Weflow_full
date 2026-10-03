@@ -1,11 +1,12 @@
 import { spawn } from 'child_process'
 import { existsSync } from 'fs'
+import { dirname } from 'path'
 import { ConfigService } from './config'
 import { integratedClient } from './integratedService'
 
 /**
- * 密钥获取（数据库密钥 / 图片密钥）完全外包给用户自备的第三方可执行程序（keyProviderPath），
- * 不再内置任何原生内存扫描或来源校验逻辑。
+ * 默认使用内置后端获取并验证数据库 / 图片密钥。
+ * 用户显式配置 keyProviderPath 时使用其第三方可执行程序。
  *
  * 协议：以一行 JSON 写入子进程 stdin 描述请求；子进程通过 stdout 按行输出 NDJSON：
  *   {"type":"progress","message":"...","level":0}  // 可多次，转发给 onStatus
@@ -48,6 +49,12 @@ export class KeyProviderService {
 
   private hasConfiguredProvider(): boolean {
     return Boolean(String(this.configService.get('keyProviderPath') || '').trim())
+  }
+
+  private imageAccountDir(value?: string, accountId?: string): string | undefined {
+    if (value && existsSync(value)) return value
+    // Settings may pass a cleaned wxid, while the real directory has a suffix.
+    return this.configService.getAccountDir(value ? dirname(value) : undefined, accountId) || value
   }
 
   private invoke<T extends { success: boolean; error?: string }>(
@@ -151,6 +158,9 @@ export class KeyProviderService {
     onStatus?: (message: string) => void,
     accountId?: string
   ): Promise<ImageKeyResult> {
+    if (!this.hasConfiguredProvider()) {
+      return integratedClient().call<ImageKeyResult>('getImageKeys', { accountDir: this.imageAccountDir(manualDir, accountId), accountId }, onStatus)
+    }
     return this.invoke<ImageKeyResult>({ action: 'get_image_key', accountDir: manualDir, accountId }, onStatus)
   }
 
@@ -158,6 +168,9 @@ export class KeyProviderService {
     userDir: string,
     onStatus?: (message: string) => void
   ): Promise<ImageKeyResult> {
+    if (!this.hasConfiguredProvider()) {
+      return integratedClient().call<ImageKeyResult>('getImageKeys', { accountDir: this.imageAccountDir(userDir), refresh: true }, onStatus)
+    }
     return this.invoke<ImageKeyResult>({ action: 'scan_image_key_memory', accountDir: userDir }, onStatus)
   }
 }

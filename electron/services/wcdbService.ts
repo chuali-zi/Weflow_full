@@ -12,6 +12,18 @@ interface WorkerMessage {
   error?: string
 }
 
+export type DatabaseMode = 'snapshot' | 'live'
+export interface DatabaseConnectionStatus {
+  mode?: DatabaseMode
+  state?: string
+  code?: string | number
+  complete?: boolean
+  missingDatabases?: string[]
+  connectionId?: string
+  revision?: number
+  [key: string]: unknown
+}
+
 /**
  * WCDB 服务 (客户端代理)
  * 负责与后台 Worker 线程通信，执行数据库操作
@@ -26,6 +38,7 @@ export class WcdbService {
   private libPath: string | null = null
   private logEnabled = false
   private monitorListener: ((type: string, json: string) => void) | null = null
+  private connectionStatusListener: ((status: DatabaseConnectionStatus) => void) | null = null
   private openIdentity: string | null = null
   private connectionOperationQueue: Promise<void> = Promise.resolve()
   private maintenanceDepth = 0
@@ -75,9 +88,8 @@ export class WcdbService {
         const { id, result, error, type, payload } = msg
 
         if (type === 'monitor') {
-          if (this.monitorListener) {
-            this.monitorListener(payload.type, payload.json)
-          }
+          if (payload?.type === 'connection-status') this.connectionStatusListener?.(this.parseStatus(payload.json))
+          else this.monitorListener?.(payload?.type || 'change', payload?.json || '{}')
           return
         }
 
@@ -222,6 +234,20 @@ export class WcdbService {
     })
   }
 
+  setConnectionStatusListener(callback: ((status: DatabaseConnectionStatus) => void) | null): void {
+    this.connectionStatusListener = callback
+  }
+
+  private parseStatus(json: unknown): DatabaseConnectionStatus {
+    if (json && typeof json === 'object') return json as DatabaseConnectionStatus
+    try {
+      const parsed = JSON.parse(String(json || '{}'))
+      return parsed && typeof parsed === 'object' ? parsed : {}
+    } catch {
+      return { state: 'error', code: 'INVALID_STATUS_EVENT' }
+    }
+  }
+
   /**
    * 检查服务是否就绪
    */
@@ -236,7 +262,7 @@ export class WcdbService {
   /**
    * 测试数据库连接
    */
-  async testConnection(accountDir: string, hexKey: string): Promise<{ success: boolean; error?: string; sessionCount?: number }> {
+  async testConnection(accountDir: string, hexKey: string, mode?: DatabaseMode): Promise<{ success: boolean; error?: string; sessionCount?: number; mode?: DatabaseMode }> {
     if (this.isMaintenanceActive()) return { success: false, error: this.maintenanceReason }
     return this.runConnectionOperation(async () => {
       if (this.isMaintenanceActive()) return { success: false, error: this.maintenanceReason }
@@ -247,7 +273,7 @@ export class WcdbService {
           success: boolean
           error?: string
           sessionCount?: number
-        }>('testConnection', { accountDir, hexKey })
+        }>('testConnection', { accountDir, hexKey, ...(mode ? { mode } : {}) })
         return testResult
       } finally {
         // A successful test against a different target temporarily shuts down the
@@ -276,11 +302,11 @@ export class WcdbService {
    * @param accountDir 账号目录的完整路径
    * @param hexKey 解密密钥
    */
-  async open(accountDir: string, hexKey: string): Promise<boolean> {
+  async open(accountDir: string, hexKey: string, mode?: DatabaseMode): Promise<boolean> {
     if (this.isMaintenanceActive()) return false
     return this.runConnectionOperation(async () => {
       if (this.isMaintenanceActive()) return false
-      const opened = await this.callWorker<boolean>('open', { accountDir, hexKey })
+      const opened = await this.callWorker<boolean>('open', { accountDir, hexKey, ...(mode ? { mode } : {}) })
       this.openIdentity = opened === true ? this.buildOpenIdentity(accountDir, hexKey) : null
       if (opened === true && this.monitorListener) {
         const monitorResult = await this.callWorker<{ success?: boolean }>('setMonitor').catch((error) => {
@@ -352,6 +378,29 @@ export class WcdbService {
   async isConnected(): Promise<boolean> {
     if (this.isMaintenanceActive()) return false
     return this.callWorker('isConnected')
+  }
+
+  async getConnectionStatus(): Promise<DatabaseConnectionStatus> {
+    return this.callWorker<DatabaseConnectionStatus>('getConnectionStatus')
+  }
+
+  async setReadMode(dataDir: string, mode: DatabaseMode): Promise<{ success: boolean; error?: string; mode?: DatabaseMode }> {
+    return this.runConnectionOperation(async () => {
+      const result = await this.callWorker<{ success: boolean; error?: string; mode?: DatabaseMode }>('setReadMode', { dataDir, mode })
+      if (result?.success) {
+        this.openIdentity = null
+        if (this.monitorListener) {
+          await this.callWorker<{ success?: boolean }>('setMonitor').catch(() => undefined)
+        }
+      }
+      return result
+    })
+  }
+
+  cancel(requestId: number | string): boolean {
+    if (!this.worker) return false
+    this.worker.postMessage({ type: 'cancel', payload: { requestId } })
+    return true
   }
 
   /**

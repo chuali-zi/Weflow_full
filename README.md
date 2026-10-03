@@ -9,43 +9,47 @@ Windows 安装包使用现有构建入口，位于 `release` 目录，当前文�
 1. Clone 或下载本仓库，在 Windows 上双击根目录的 **启动 WeFlow.cmd**。首次启动会在仓库内准备运行环境、安装依赖并构建，需要联网；后续启动复用已准备的环境。
 2. 在 WeFlow 原有欢迎/数据库设置界面，选择或填写微信数据目录根路径。登录电脑微信后，点击原有的 **自动获取密钥** 按钮。
 3. 如果同一个微信账号有多套数据目录，密钥会按各数据库首页认证。唯一匹配的目录会自动填回原有路径栏；无法唯一判断时，按原有错误提示选择正确路径。
-4. 点击原有的**连接数据库**操作。首次连接或检测到数据库 / WAL 有变化时，如果微信仍在运行，WeFlow 会提示先退出。请从系统托盘菜单**正常退出微信**，再点一次原有的**连接数据库**操作，完成副本准备或更新。准备完成后即可按原有方式查看和搜索聊天记录。
+4. 在欢迎页或数据库设置页选择**在线读取**，然后连接数据库。微信可以保持运行，新提交的聊天记录会自动刷新会话列表和聊天窗口。如果选择**离线副本**，首次准备或更新副本时需要从系统托盘正常退出微信，再连接数据库。
 
-只关闭微信主窗口不代表微信已退出。源数据库以只读方式处理；副本是准备时的离线快照，当前不实时同步微信的新消息。连接时若检查到源库及 WAL 元信息没有变化，会复用现有副本；检测到变化时，按上述提示正常退出微信并再次连接即可更新。
+在线模式使用 SQLCipher 只读连接，由数据库引擎处理加密页面和 WAL；无需反复复制或整库解密。离线副本是固定快照，可用于稳定的大范围导出；更新副本仍需要退出微信。没有保存读取模式的旧配置默认使用离线副本，成功选择后按账号保存。
 
 ## CLI（Agent / 脚本）
 
-一条命令获取密钥、准备并验证副本、配置现有 WeFlow，然后打开原版 GUI：
+一条命令获取密钥、验证在线连接、配置现有 WeFlow，然后打开 GUI：
 
 ```bat
-weflow.cmd prepare --launch
+weflow.cmd prepare --mode live --launch
 ```
 
-有多个微信数据目录时明确指定目标；微信仍运行时可让命令最多等待 180 秒：
+有多个微信数据目录时明确指定目标：
 
 ```bat
-weflow.cmd prepare --data-dir "D:\wechat\xwechat_files\wxid_example\db_storage" --wait-exit 180 --launch
+weflow.cmd prepare --mode live --data-dir "D:\wechat\xwechat_files\wxid_example\db_storage" --launch
 ```
 
-命令只等待微信正常退出，**不会结束微信进程**。默认不等待时，如果微信仍运行会以退出码 `10` 结束；已取得的密钥会保留，正常退出后重新运行命令即可。源码目录的 `weflow.cmd` 会自动准备依赖并构建 GUI；安装目录的同名脚本直接使用包内后端，不需要 Node.js 或 Python。首次使用与错误恢复见 [Agent 首次启动指南](docs/agent-first-start.md)，命令参数和退出码见 [CLI 使用说明](docs/cli.md)。
+在线模式不要求退出微信。需要快照时使用 `prepare --mode snapshot --wait-exit 180 --launch`；命令只等待正常退出，**不会结束微信进程**。`decrypt` 始终生成快照。源码目录的 `weflow.cmd` 自动准备依赖并构建 GUI；安装目录的同名脚本使用包内后端。首次使用与错误恢复见 [Agent 首次启动指南](docs/agent-first-start.md)，模式、JSON 和退出码见 [CLI 使用说明](docs/cli.md)。
 
 ## 接入范围
 
 | 能力 | 当前范围 |
 | --- | --- |
 | 数据目录与密钥 | 识别配置目录并按数据库校验密钥；密钥按数据库分别缓存。原有外部密钥工具配置仍由 WeFlow 使用；未配置时调用内置 wxtext。 |
-| 聊天数据库 | 完整消息分库作为准备要求；复制数据库、合并已提交 WAL、逐页认证解密后，以只读 SQLite 查询。 |
+| 聊天数据库 | live 使用只读 SQLCipher 查询微信 DB/WAL；snapshot 复制、重放已提交 WAL、逐页认证解密后以只读 SQLite 查询。两者均要求完整核心消息分库。 |
 | 聊天查询 | 联系人、会话、消息分页、文本搜索、发送者识别、压缩长文本及基础统计。 |
 | 导出 | 保留 WeFlow 原有格式和入口；显式配置的第三方导出程序仍按原配置使用，内置原始 JSONL 接入可用时交给原格式转换器。 |
-| 其他能力 | 图片/视频/语音等媒体、完整群成员名单、朋友圈专用查询和部分高级报表尚未完整接入或验证；实时同步和数据库写操作不在离线副本范围内。 |
+| 热加载 | 内置 live 连接检测提交并失效缓存，刷新列表和当前消息窗口，处理同秒消息、修改和删除；浏览历史时保持消息锚点。 |
+| 图片 | 已接入账号 V2 图片密钥自动获取、本机附件索引和内置解密；在线聊天页自动重试晚到附件。未下载到本机的图片需要先由微信下载。 |
+| 其他能力 | 视频/语音等其他媒体、完整群成员名单、朋友圈专用查询和部分高级报表尚未完整接入或验证；不支持向微信源数据库写入。 |
 
-手动 GUI 流程会继续按原设置使用显式配置的密钥获取 `.exe`、WCDB `.dll` 或 WeLive 导出 `.exe`。CLI 的 `configure` / `prepare` / `launch` 会将目标 profile 的密钥提供程序和 WCDB 切换到内置后端，接入已经验证的副本；详见 [CLI 配置说明](docs/cli.md)。
+手动 GUI 流程会继续按原设置使用显式配置的密钥获取 `.exe`、WCDB `.dll` 或 WeLive 导出 `.exe`。CLI 的 `configure` / `prepare` / `launch` 会将目标 profile 的密钥提供程序和 WCDB 切换到内置后端，接入已经验证的 live 或 snapshot 数据源；详见 [CLI 配置说明](docs/cli.md)。
 
 ## 验证状态
 
+当前后端 **30 项回归测试**通过，源码及包内资源的 Electron 在线测试验证了 20 条同秒新增、修改、删除、历史补入、滚动锚点和独立在线导出。真实微信继续运行时，live verify 读到 **411 个实际聊天会话**，源码约 2.2 秒完成；包内 CLI 同样通过，并已用 live 启动现有 profile。最终 Windows 安装包已生成，完整交互安装尚未验收。在线架构、接口和复现方法见 [热加载文档](docs/live-validation.md)。以下整库解密、大规模导出和完整性结果属于此前 snapshot 验证。
+
 已在真实微信 **4.1.13.65** 上验证数据库首页密钥：微信配置指向的 D 盘目录有 **21 / 21** 个数据库通过 HMAC 认证；旧 C 盘目录为 **0 / 18**。独立打包后端能够按微信配置选择 D 盘，且缓存的 **21** 个密钥全部通过相应数据库认证；21 个数据库均已整库解密。
 
-已通过 **17 项 Python 回归测试**。源码 CLI 的 `prepare` 已成功写入用户默认 `%APPDATA%\WeFlow-full` 配置（21 个数据库、411 个会话）。独立 profile 上的 `doctor`、`accounts`、`status`、`keys`、`verify`、`configure`、`sessions`、`messages`、`search` 和 `export` 命令均通过；冻结后端的 `verify` 也通过。
+源码 CLI 的 snapshot `prepare` 已成功写入用户默认 `%APPDATA%\WeFlow-full` 配置（21 个数据库、411 个会话）。独立 profile 上的 `doctor`、`accounts`、`status`、`keys`、`verify`、`configure`、`sessions`、`messages`、`search` 和 `export` 命令均通过；冻结后端的 `verify` 也通过。
 
 使用真实 profile 启动原 WeFlow GUI，无需手动连接数据库或补写配置即可自动进入 `#/home`。界面列出 700 个上游会话项（其中含联系人虚拟会话；后端实际有消息的会话为 411 个），实测读取 50 条消息、搜索返回 20 条。TXT、HTML、JSON 和 WeClone CSV 导出通过；JSON 与 WeClone CSV 各包含 **8,173** 条消息。未验证通用 CSV 格式。
 
@@ -53,7 +57,7 @@ weflow.cmd prepare --data-dir "D:\wechat\xwechat_files\wxid_example\db_storage" 
 
 ## 本地数据
 
-运行状态和解密后的聊天副本保存在当前 Windows 用户的应用数据目录；密钥缓存由 Windows DPAPI 保护。副本是明文 SQLite，应按本机聊天数据管理。源微信数据库不在原位置解密或执行 SQL。
+运行状态和聊天副本保存在当前 Windows 用户的应用数据目录；密钥缓存由 Windows DPAPI 保护。snapshot 是明文 SQLite，应按本机聊天数据管理。live 在加密源库上执行只读查询，常规查看不生成整库明文副本；导出会生成所选内容的明文文件。
 
 首次启动生成的 `.venv`、`.runtime`、`node_modules` 等目录已加入 Git 忽略规则。
 

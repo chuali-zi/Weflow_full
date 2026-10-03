@@ -13,7 +13,7 @@ export async function runIntegratedExport(options: RunWeliveExportOptions): Prom
     const result = await client.call('exportRaw', { request: options.request }, (message) => {
       options.onEvent?.({ type: 'progress', phase: 'reading', label: message })
     })
-    if (!result.success) throw new Error([result.error, result.action].filter(Boolean).join(' '))
+    if (!result.success) throw new Error([result.code, result.error, result.action].filter(Boolean).join(' '))
     options.onEvent?.({ type: 'progress', phase: 'complete', current: options.request.sessionIds.length })
     return result
   } catch (error) {

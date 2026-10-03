@@ -5744,6 +5744,60 @@ function ChatPage(props: ChatPageProps) {
     scheduleGroupSenderWarmup
   ])
 
+  // Live refreshes replace the loaded window. Restore the first visible message
+  // by stable key so edits/deletes do not move a user who is reading history.
+  useEffect(() => {
+    const handleLiveAnchor = (event: Event) => {
+      const detail = (event as CustomEvent<{
+        sessionId?: string
+        messageKey?: string
+        index?: number
+        offset?: number
+        bottom?: boolean
+      }>).detail
+      if (!detail || detail.sessionId !== currentSessionId || messages.length === 0) return
+      suppressAutoScrollOnNextMessageGrowthRef.current = true
+      isMessageListAtBottomRef.current = Boolean(detail.bottom)
+      requestAnimationFrame(() => {
+        if (detail.sessionId !== currentSessionRef.current) return
+        const currentMessages = useChatStore.getState().messages
+        if (detail.bottom) {
+          messageVirtuosoRef.current?.scrollToIndex({ index: Math.max(0, currentMessages.length - 1), align: 'end', behavior: 'auto' })
+          return
+        }
+        const resolvedIndex = detail.messageKey
+          ? currentMessages.findIndex((message) => getMessageKey(message) === detail.messageKey)
+          : -1
+        const index = resolvedIndex >= 0
+          ? resolvedIndex
+          : Math.min(Math.max(Number(detail.index || 0), 0), Math.max(currentMessages.length - 1, 0))
+        if (messageVirtuosoRef.current) {
+          messageVirtuosoRef.current.scrollToIndex({
+            index,
+            align: 'start',
+            offset: -Math.round(Number(detail.offset || 0)),
+            behavior: 'auto'
+          })
+          requestAnimationFrame(() => {
+            if (detail.sessionId !== currentSessionRef.current) return
+            const list = messageListRef.current
+            const anchor = list && Array.from(list.querySelectorAll<HTMLElement>('.message-wrapper'))
+              .find(element => element.dataset.messageKey === detail.messageKey)
+            if (list && anchor) {
+              list.scrollTop += anchor.getBoundingClientRect().top - list.getBoundingClientRect().top - Number(detail.offset || 0)
+            }
+          })
+          return
+        }
+        const list = messageListRef.current
+        const anchor = list?.querySelectorAll('.message-wrapper')[index] as HTMLElement | undefined
+        if (list && anchor) list.scrollTop = Math.max(0, anchor.offsetTop - Number(detail.offset || 0))
+      })
+    }
+    window.addEventListener('chat:restore-live-anchor', handleLiveAnchor)
+    return () => window.removeEventListener('chat:restore-live-anchor', handleLiveAnchor)
+  }, [currentSessionId, messages, getMessageKey])
+
   const handleMessageAtBottomStateChange = useCallback((atBottom: boolean) => {
     if (messages.length <= 0) {
       isMessageListAtBottomRef.current = true
@@ -8546,7 +8600,7 @@ function ChatPage(props: ChatPageProps) {
     )
 
     return (
-      <div className={`message-wrapper ${wrapperClass} ${highlightedMessageSet.has(messageKey) ? 'new-message' : ''}`}>
+      <div className={`message-wrapper ${wrapperClass} ${highlightedMessageSet.has(messageKey) ? 'new-message' : ''}`} data-message-key={messageKey}>
         {showDateDivider && (
           <div className="date-divider">
             <span>{formatDateDivider(msg.createTime)}</span>
@@ -11515,6 +11569,9 @@ function MessageBubble({
           }) as SharedImageDecryptResult
         })
         if (result.success && result.localPath) {
+          setImageError(false)
+          setImageErrorReason('')
+          setImageFailureKind(undefined)
           const renderPath = toRenderableImageSrc(result.localPath)
           if (!renderPath) {
             if (!silent) {
@@ -11809,6 +11866,20 @@ function MessageBubble({
     imageAutoDecryptTriggered.current = true
     void enqueueAutoMediaTask(async () => requestImageDecrypt()).catch(() => { })
   }, [isImage, imageInView, imageLocalPath, imageLoading, message.imageMd5, message.imageDatName, requestImageDecrypt])
+
+  // A live message may commit before WeChat finishes writing its attachment.
+  // Retry only visible unresolved images; successful images stop polling.
+  const imageDatabaseMode = useChatStore(state => state.databaseStatus?.mode)
+  useEffect(() => {
+    if (imageDatabaseMode !== 'live' || !isImage || !imageInView || imageLocalPath) return
+    if (!message.imageMd5 && !message.imageDatName) return
+    const timer = window.setInterval(() => {
+      if (!imageDecryptPendingRef.current) {
+        void enqueueAutoMediaTask(async () => requestImageDecrypt(false, true)).catch(() => { })
+      }
+    }, 3000)
+    return () => window.clearInterval(timer)
+  }, [imageDatabaseMode, isImage, imageInView, imageLocalPath, message.imageMd5, message.imageDatName, requestImageDecrypt])
 
   useEffect(() => {
     if (!isImage || !imageHasUpdate || !imageInView) return

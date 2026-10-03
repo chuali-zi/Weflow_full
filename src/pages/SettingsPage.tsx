@@ -177,6 +177,7 @@ function SettingsPage({ onClose }: SettingsPageProps = {}) {
   const [imageAesKey, setImageAesKey] = useState('')
   const [dbPath, setDbPath] = useState('')
   const [accountId, setAccountId] = useState('')
+  const [databaseMode, setDatabaseMode] = useState<'snapshot' | 'live'>('snapshot')
   const [cachePath, setCachePath] = useState('')
   const [wcdbLibPath, setWcdbLibPath] = useState('')
   const [keyProviderPath, setKeyProviderPath] = useState('')
@@ -614,6 +615,7 @@ function SettingsPage({ onClose }: SettingsPageProps = {}) {
       const savedWindowCloseBehavior = await configService.getWindowCloseBehavior()
       const savedQuoteLayout = await configService.getQuoteLayout()
       const savedUpdateChannel = await configService.getUpdateChannel()
+      const savedDatabaseStatus = await window.electronAPI.wcdb.getConnectionStatus().catch(() => null)
 
       const savedAuthEnabled = await window.electronAPI.auth.verifyEnabled()
       const savedAuthUseHello = await configService.getAuthUseHello()
@@ -635,6 +637,9 @@ function SettingsPage({ onClose }: SettingsPageProps = {}) {
       if (savedPath) setDbPath(savedPath)
       if (savedAccountId) setAccountId(savedAccountId)
       if (savedCachePath) setCachePath(savedCachePath)
+      if (savedDatabaseStatus?.mode === 'live' || savedDatabaseStatus?.mode === 'snapshot') {
+        setDatabaseMode(savedDatabaseStatus.mode)
+      }
 
       setWcdbLibPath(await configService.getWcdbLibPath())
       setKeyProviderPath(await configService.getKeyProviderPath())
@@ -1594,8 +1599,16 @@ function SettingsPage({ onClose }: SettingsPageProps = {}) {
 
     setIsTesting(true)
     try {
-      const result = await window.electronAPI.wcdb.testConnection(dbPath, decryptKey, accountId)
+      const external = Boolean(wcdbLibPath.trim())
+      const result = await window.electronAPI.wcdb.testConnection(dbPath, decryptKey, accountId, external ? undefined : databaseMode)
       if (result.success) {
+        if (!external) {
+          const modeResult = await window.electronAPI.wcdb.setReadMode(dbPath, accountId, databaseMode)
+          if (!modeResult?.success) {
+            showMessage(modeResult.error || '读取方式切换失败', false)
+            return
+          }
+        }
         showMessage('连接测试成功！数据库可正常访问', true)
       } else {
         showMessage(result.error || '连接测试失败', false)
@@ -2486,6 +2499,21 @@ function SettingsPage({ onClose }: SettingsPageProps = {}) {
 
   const renderDatabaseTab = () => (
     <div className="tab-content">
+      <div className="form-group">
+        <label>数据读取方式</label>
+        <span className="form-hint">内置后端支持在线读取和离线副本；配置外部 WCDB 实现时继续使用外部组件语义。</span>
+        <div className="settings-mode-choice" role="radiogroup" aria-label="数据读取方式">
+          <label>
+            <input type="radio" name="settings-database-mode" checked={databaseMode === 'live'} onChange={() => setDatabaseMode('live')} />
+            <span><strong>在线读取</strong><small>微信运行时自动检测提交</small></span>
+          </label>
+          <label>
+            <input type="radio" name="settings-database-mode" checked={databaseMode === 'snapshot'} onChange={() => setDatabaseMode('snapshot')} />
+            <span><strong>离线副本</strong><small>使用稳定的本地副本</small></span>
+          </label>
+        </div>
+      </div>
+
       <div className="form-group">
         <label>连接测试</label>
         <span className="form-hint">检测当前数据库配置是否可用</span>

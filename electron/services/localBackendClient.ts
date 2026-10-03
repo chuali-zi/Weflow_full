@@ -3,6 +3,11 @@ import { existsSync } from 'fs'
 import { join, resolve } from 'path'
 import { createInterface } from 'readline'
 
+export type LocalBackendEvent = {
+  type: 'change' | 'connection-status' | string
+  payload?: unknown
+}
+
 /** The bundled Python backend. Every worker uses this same small transport. */
 export class LocalBackendClient {
   private child: ChildProcessWithoutNullStreams | null = null
@@ -13,7 +18,13 @@ export class LocalBackendClient {
     timer: ReturnType<typeof setTimeout>
     progress?: (message: string) => void
   }>()
+  private eventListeners = new Set<(event: LocalBackendEvent) => void>()
   constructor(private stateDir: string, private resourcesPath = '') {}
+
+  onEvent(listener: (event: LocalBackendEvent) => void): () => void {
+    this.eventListeners.add(listener)
+    return () => this.eventListeners.delete(listener)
+  }
   private start(): void {
     if (this.child) return
     const resources = this.resourcesPath || (process as NodeJS.Process & { resourcesPath?: string }).resourcesPath || ''
@@ -46,6 +57,12 @@ export class LocalBackendClient {
     lines.on('line', (line) => {
       let event: any
       try { event = JSON.parse(line) } catch { return }
+      if (event && event.type !== 'progress' && typeof event.type === 'string' && event.id === undefined) {
+        for (const listener of this.eventListeners) {
+          try { listener(event) } catch { /* event consumers must not break transport */ }
+        }
+        return
+      }
       if (event.type === 'progress') {
         for (const entry of this.pending.values()) entry.progress?.(String(event.message || ''))
         return
@@ -71,10 +88,11 @@ export class LocalBackendClient {
     child.on('exit', (code) => fail(new Error(`内置后端已退出（${code ?? '中断'}），请重新打开记录。`)))
     child.stdin.on('error', () => {})
   }
-  call<T = any>(method: string, payload: Record<string, any> = {}, progress?: (message: string) => void): Promise<T> {
+  call<T = any>(method: string, payload: Record<string, any> = {}, progress?: (message: string) => void, requestId?: number): Promise<T> {
     try { this.start() } catch (error) { return Promise.reject(error) }
     return new Promise<T>((resolvePromise, reject) => {
-      const id = ++this.sequence
+      const id = requestId ?? ++this.sequence
+      if (id > this.sequence) this.sequence = id
       const timer = setTimeout(() => {
         const entry = this.pending.get(id)
         if (!entry) return
@@ -85,6 +103,18 @@ export class LocalBackendClient {
       this.pending.set(id, { resolve: resolvePromise, reject, timer, progress })
       this.child!.stdin.write(`${JSON.stringify({ id, method, payload })}\n`)
     })
+  }
+
+  /** Cancellation is deliberately written directly to stdin so it can interrupt a long RPC. */
+  cancel(requestId: number | string): boolean {
+    const stdin = this.child?.stdin
+    if (!stdin || stdin.destroyed || stdin.writableEnded) return false
+    try {
+      stdin.write(`${JSON.stringify({ id: null, method: 'cancel', payload: { requestId } })}\n`)
+      return true
+    } catch {
+      return false
+    }
   }
   dispose(): void {
     const child = this.child

@@ -1,2 +1,3 @@
 cryptography>=42
 zstandard>=0.22
+sqlcipher3==0.6.2

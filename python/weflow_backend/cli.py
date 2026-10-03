@@ -7,17 +7,23 @@ import sqlite3
 import subprocess
 import sys
 import time
+from datetime import datetime
 
 from wxtext.errors import ToolError
 from wxtext.snapshot import inventory
 from wxtext.cipher import verify_database_integrity
-from .backend import Backend, account_root
+from .backend import Backend, account_root, clean_id
 
 
 EXIT_CODES = {'NEED_EXIT': 10, 'NEED_LOGIN': 11, 'KEY_NOT_FOUND': 12,
               'ACCOUNT_REQUIRED': 13, 'ACCOUNT_DIRECTORY_MISMATCH': 13,
               'SNAPSHOT_REQUIRED': 14, 'GUI_RUNNING': 15, 'PROFILE_LOCKED': 16,
-              'CLI_USAGE': 2, 'GUI_NOT_BUILT': 17}
+              'CLI_USAGE': 2, 'GUI_NOT_BUILT': 17,
+              'LIVE_ENGINE_UNAVAILABLE': 18, 'LIVE_BUSY': 19,
+              'LIVE_READ_TIMEOUT': 20, 'SOURCE_REPLACED': 21,
+              'CURSOR_STALE': 22, 'CANCELLED': 23}
+
+MODES = ('snapshot', 'live')
 
 
 class Parser(argparse.ArgumentParser):
@@ -37,6 +43,8 @@ def parser():
         target.add_argument('--user-data', type=Path, default=default, help='WeFlow 配置及后端状态目录')
         target.add_argument('--data-dir', type=Path, default=default, help='账号 db_storage 或其上级目录')
         target.add_argument('--app', type=Path, default=default, help='指定已安装的 WeFlow.exe')
+        target.add_argument('--mode', choices=MODES, default=default,
+                            help='读取模式：snapshot（离线副本）或 live（在线短事务）')
         target.add_argument('--quiet', action='store_true', default=argparse.SUPPRESS if suppress else False, help='关闭进度输出')
     common(root)
     commands = root.add_subparsers(dest='command', required=True)
@@ -52,7 +60,7 @@ def parser():
         if name in {'keys', 'prepare'}:
             command.add_argument('--refresh', action='store_true', help='重新扫描密钥，不复用缓存')
         if name in {'decrypt', 'prepare'}:
-            command.add_argument('--wait-exit', type=float, default=0, metavar='SECONDS', help='等待微信退出的最长秒数；不会终止进程')
+            command.add_argument('--wait-exit', type=float, default=None, metavar='SECONDS', help='等待微信退出的最长秒数；不会终止进程')
         if name == 'prepare':
             command.add_argument('--launch', action='store_true', help='准备成功后打开 GUI')
         if name in {'messages', 'search', 'export'}:
@@ -80,6 +88,90 @@ def selected_root(args, backend):
         raise ToolError('ACCOUNT_REQUIRED', '请用 --data-dir 选择目标账号目录。',
                         details={'accounts': accounts})
     return Path(choices[0]['dataDir'])
+
+
+def saved_mode(backend, root):
+    """Read the mode without making old backends or old profiles unreadable."""
+    state = getattr(backend, 'state', None)
+    reader = getattr(state, 'mode', None)
+    if callable(reader):
+        try:
+            value = reader(Path(root).resolve())
+        except TypeError:
+            value = reader(Path(root).resolve(), None)
+        if value in MODES:
+            return value
+    try:
+        settings = state.settings()
+        modes = settings.get('database_modes', {}) if isinstance(settings, dict) else {}
+        key = os.path.normcase(str(Path(root).resolve()))
+        value = modes.get(key) or modes.get(str(Path(root).resolve()))
+        if value in MODES:
+            return value
+    except (AttributeError, TypeError):
+        pass
+    return 'snapshot'
+
+
+def selected_mode(args, backend, root):
+    explicit = getattr(args, 'mode', None)
+    if explicit in MODES:
+        return explicit
+    return saved_mode(backend, root)
+
+
+def save_mode(backend, root, mode, explicit=False):
+    """Persist only after a successful configure/launch/prepare operation."""
+    if not explicit:
+        return
+    writer = getattr(getattr(backend, 'state', None), 'set_mode', None)
+    if not callable(writer):
+        return
+    writer(Path(root).resolve(), mode)
+
+
+def connection_status(backend, root, mode):
+    getter = getattr(backend, 'getConnectionStatus', None)
+    if not callable(getter):
+        return None
+    try:
+        value = getter(str(root), mode=mode)
+    except TypeError:
+        value = getter(str(root))
+    return value if isinstance(value, dict) else None
+
+
+def freshness(status):
+    if not isinstance(status, dict):
+        return None
+    value = status.get('freshness')
+    if isinstance(value, dict):
+        result = {key: value[key] for key in ('connectionId', 'revision', 'queriedAt', 'consistency')
+                  if key in value}
+    else:
+        fields = ('connectionId', 'revision', 'queriedAt', 'consistency')
+        result = {key: status[key] for key in fields if key in status}
+    if not result:
+        return None
+    result.setdefault('queriedAt', datetime.now().astimezone().isoformat(timespec='seconds'))
+    result.setdefault('consistency', 'per_database')
+    return result
+
+
+def with_query_metadata(value, backend, root, mode):
+    result = dict(value) if isinstance(value, dict) else {'value': value}
+    result.setdefault('mode', mode)
+    status = connection_status(backend, root, mode)
+    fresh = freshness(status)
+    if fresh:
+        result.setdefault('freshness', fresh)
+    else:
+        # A legacy backend cannot provide a connection identity. Keep the
+        # timestamp useful while avoiding a made-up identity or revision.
+        result.setdefault('freshness', {
+            'queriedAt': datetime.now().astimezone().isoformat(timespec='seconds'),
+            'consistency': 'per_database'})
+    return result
 
 
 def key_result(result):
@@ -119,13 +211,58 @@ def verify_snapshot(backend, root):
         validation = verify_database_integrity(path)
         if validation['status'] != 'ok':
             limited.append({'file': name, **validation})
-    backend.open(str(root))
+    # An explicit snapshot command must bypass a saved live preference.
+    backend.open(str(root), mode='snapshot')
     sessions = backend.getSessions()['sessions']
     sample_count = len(backend.getMessages(sessions[0]['username'], limit=5)['messages']) if sessions else 0
     return {'success': True, 'dataDir': str(root), 'accountId': meta['accountId'],
             'snapshotDirectory': meta['directory'], 'capturedAt': meta['capturedAt'],
             'databaseCount': len(meta['files']), 'sessionCount': len(sessions), 'sampleMessageCount': sample_count,
             'sourceChanged': backend.source_metadata_changed(root, meta), 'limitedChecks': limited}
+
+
+def verify_live(backend, root):
+    """Open and minimally query the source without creating an offline copy."""
+    tested = backend.testConnection(str(root), mode='live')
+    if isinstance(tested, dict) and tested.get('success') is False:
+        raise ToolError(tested.get('code', 'LIVE_ENGINE_UNAVAILABLE'),
+                        tested.get('error') or tested.get('message') or '在线连接验证失败。',
+                        tested.get('action'), tested.get('details'))
+    opened = backend.open(str(root), mode='live')
+    if isinstance(opened, dict) and opened.get('success') is False:
+        raise ToolError(opened.get('code', 'LIVE_ENGINE_UNAVAILABLE'),
+                        opened.get('error') or opened.get('message') or '在线连接打开失败。',
+                        opened.get('action'), opened.get('details'))
+    sessions = backend.getSessions(mode='live')
+    if not isinstance(sessions, dict) or sessions.get('success') is False:
+        if isinstance(sessions, dict):
+            raise ToolError(sessions.get('code', 'LIVE_ENGINE_UNAVAILABLE'),
+                            sessions.get('error') or sessions.get('message') or '在线会话验证失败。',
+                            sessions.get('action'), sessions.get('details'))
+        raise ToolError('LIVE_ENGINE_UNAVAILABLE', '在线会话验证失败。')
+    session_rows = sessions.get('sessions') if isinstance(sessions.get('sessions'), list) else []
+    sample_count = 0
+    if session_rows:
+        sample = backend.getMessages(session_rows[0].get('username', ''), limit=5, mode='live')
+        if isinstance(sample, dict):
+            sample_count = len(sample.get('messages') or [])
+    status = connection_status(backend, root, 'live') or {}
+    value = {'success': True, 'mode': 'live', 'dataDir': str(root),
+             'accountId': (tested.get('accountId') if isinstance(tested, dict) else None)
+             or getattr(backend, 'owner', None) or clean_id(root.parent.name),
+             'sessionCount': len(session_rows), 'sampleMessageCount': sample_count}
+    for key in ('state', 'complete', 'missingDatabases', 'connectionId', 'revision', 'engine', 'capabilities'):
+        if key in status:
+            value[key] = status[key]
+    if isinstance(tested, dict):
+        for key in ('engine', 'capabilities', 'missingDatabases'):
+            if key in tested and key not in value:
+                value[key] = tested[key]
+    fresh = freshness(status)
+    value['freshness'] = fresh or {
+        'queriedAt': datetime.now().astimezone().isoformat(timespec='seconds'),
+        'consistency': 'per_database'}
+    return value
 
 
 def gui_command(args, profile):
@@ -153,7 +290,8 @@ def gui_command(args, profile):
 
 def configure_gui(args, profile, root):
     command, directory, env = gui_command(args, profile)
-    result = subprocess.run(command + ['--weflow-configure', '--data-dir', str(root)],
+    mode = getattr(args, '_resolved_mode', None) or getattr(args, 'mode', None) or 'snapshot'
+    result = subprocess.run(command + ['--weflow-configure', '--data-dir', str(root), '--mode', mode],
                             cwd=directory, env=env, capture_output=True, encoding='utf-8', errors='replace',
                             creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
     lines = [line.split('WEFLOW_CLI_RESULT=', 1)[1] for line in result.stdout.splitlines()
@@ -187,22 +325,43 @@ def launch_gui(args, profile):
 def execute(args, backend, profile):
     command = args.command
     if command == 'accounts':
-        return backend.discover()
+        result = backend.discover()
+        for item in result.get('accounts', []):
+            try:
+                item.setdefault('mode', saved_mode(backend, item['dataDir']))
+            except (KeyError, TypeError):
+                pass
+        return result
     if command == 'doctor':
         processes = backend.source().processes()
+        accounts = backend.discover()['accounts']
+        for item in accounts:
+            try:
+                item.setdefault('mode', saved_mode(backend, item['dataDir']))
+            except (KeyError, TypeError):
+                pass
         return {'success': True, 'userDataPath': str(profile), 'backendStatePath': str(backend.state.root),
                 'frozen': bool(getattr(sys, 'frozen', False)),
                 'wechat': [{'pid': p.pid, 'name': p.name, 'version': p.version} for p in processes],
-                'accounts': backend.discover()['accounts']}
+                'accounts': accounts}
+    if command == 'decrypt' and getattr(args, 'mode', None) == 'live':
+        raise ToolError('CLI_USAGE', 'decrypt 只支持 snapshot 模式；live 不会创建离线副本。')
+    if command in {'prepare', 'decrypt'} and getattr(args, 'mode', None) == 'live' and args.wait_exit is not None:
+        raise ToolError('CLI_USAGE', '--wait-exit 只对 snapshot 模式有效。')
     if command == 'keys':
         return key_result(backend.prepareKeys(dataDir=str(args.data_dir) if args.data_dir else None, refresh=args.refresh))
     if command == 'prepare':
         acquired = backend.prepareKeys(dataDir=str(args.data_dir) if args.data_dir else None, refresh=args.refresh)
         root = Path(acquired['dataDir'])
+        mode = selected_mode(args, backend, root)
     else:
         root = selected_root(args, backend)
+        # decrypt is intentionally snapshot-only. A saved live preference
+        # must never turn it into an online operation.
+        mode = 'snapshot' if command == 'decrypt' else selected_mode(args, backend, root)
+    args._resolved_mode = mode
     if command == 'status':
-        value = backend.status(str(root))
+        value = backend.status(str(root), mode=mode)
         headers = backend.database_headers(root)
         from wxtext.cipher import verify_key
         keys = backend.state.load_keys(root)
@@ -211,41 +370,54 @@ def execute(args, backend, profile):
         if value.get('ready'):
             meta = backend.read_active(root)
             value.update(databaseCount=len(meta['files']), sourceChanged=backend.source_metadata_changed(root, meta))
+        value.setdefault('mode', mode)
+        fresh = freshness(value)
+        if fresh:
+            value.setdefault('freshness', fresh)
+        else:
+            value['freshness'] = {'queriedAt': datetime.now().astimezone().isoformat(timespec='seconds'),
+                                  'consistency': 'per_database'}
         return value
     if command in {'decrypt', 'prepare'}:
-        wait_for_exit(backend, args.wait_exit)
-        backend.testConnection(str(root))
-        verified = verify_snapshot(backend, root)
+        if mode == 'live':
+            verified = verify_live(backend, root)
+        else:
+            wait_for_exit(backend, 0 if args.wait_exit is None else args.wait_exit)
+            backend.testConnection(str(root), mode='snapshot')
+            verified = verify_snapshot(backend, root)
         if command == 'decrypt':
             return verified
         configured = configure_gui(args, profile, root)
         value = {**verified, 'configured': True, 'verifiedDatabases': acquired['verifiedDatabases'],
                  'unavailableDatabases': acquired.get('unavailableDatabases', []), 'userDataPath': str(profile)}
+        save_mode(backend, root, mode, explicit=getattr(args, 'mode', None) is not None)
         if args.launch:
             value.update(launch_gui(args, profile))
         return value
     if command == 'verify':
-        return verify_snapshot(backend, root)
+        return verify_live(backend, root) if mode == 'live' else verify_snapshot(backend, root)
     if command in {'configure', 'launch'}:
-        verified = verify_snapshot(backend, root)
+        verified = verify_live(backend, root) if mode == 'live' else verify_snapshot(backend, root)
         configured = configure_gui(args, profile, root)
         value = {**verified, 'configured': True, 'userDataPath': str(profile)}
+        save_mode(backend, root, mode, explicit=getattr(args, 'mode', None) is not None)
         if command == 'launch':
             value.update(launch_gui(args, profile))
         return value
-    # Query commands only use an existing complete snapshot.
-    backend.read_active(root)
-    backend.open(str(root))
+    if mode == 'snapshot':
+        backend.read_active(root)
+    backend.open(str(root), mode=mode)
     if command == 'sessions':
-        return backend.getSessions()
+        return with_query_metadata(backend.getSessions(mode=mode), backend, root, mode)
     if command in {'messages', 'search'} and (args.limit < 1 or args.offset < 0):
         raise ToolError('CLI_USAGE', '--limit 必须为正数，--offset 不能为负数。')
     if command == 'messages':
-        return backend.getMessages(args.session, args.limit, args.offset)
+        return with_query_metadata(backend.getMessages(args.session, args.limit, args.offset, mode=mode), backend, root, mode)
     if command == 'search':
-        return backend.searchMessages(args.keyword, args.session, args.limit, args.offset)
+        return with_query_metadata(backend.searchMessages(args.keyword, args.session, args.limit, args.offset, mode=mode), backend, root, mode)
     if command == 'export':
-        return backend.exportRaw({'account': {'accountDir': str(root)}, 'sessionIds': [args.session], 'exportsDir': str(args.output)})
+        return with_query_metadata(backend.exportRaw({'account': {'accountDir': str(root)}, 'sessionIds': [args.session],
+                                                      'exportsDir': str(args.output), 'mode': mode}), backend, root, mode)
     raise ToolError('CLI_USAGE', '未知命令。')
 
 

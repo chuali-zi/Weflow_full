@@ -16,7 +16,24 @@ const describeError = (result: any): string => {
   }
   return parts.join('\n') || '本地数据库操作失败。'
 }
+const attachClientEvents = (backend: LocalBackendClient): void => {
+  backend.onEvent((event) => {
+    const eventPayload = event.payload && typeof event.payload === 'object'
+      ? event.payload as Record<string, unknown>
+      : {}
+    parentPort!.postMessage({
+      type: 'monitor',
+      payload: { type: event.type, json: JSON.stringify(eventPayload) }
+    })
+  })
+}
 parentPort?.on('message', (message: any) => {
+  if (message?.type === 'cancel') {
+    const requestId = message.payload?.requestId
+    const result = client?.cancel(requestId) === true
+    parentPort!.postMessage({ id: message.id, result: { success: result } })
+    return
+  }
   queue = queue.then(async () => {
     const { id, type, payload = {} } = message
     try {
@@ -24,6 +41,7 @@ parentPort?.on('message', (message: any) => {
       if (type === 'setPaths') {
         client?.dispose()
         client = new LocalBackendClient(join(payload.userDataPath || process.env.WEFLOW_USER_DATA_PATH || process.cwd(), 'backend'), payload.resourcesPath)
+        attachClientEvents(client)
         result = { success: true }
       } else if (type === 'setLibPath') {
         result = String(payload.libPath || '').trim()
@@ -31,13 +49,16 @@ parentPort?.on('message', (message: any) => {
           : { success: true }
       } else if (type === 'setLogEnabled') {
         result = { success: true }
-      } else if (['setMonitor', 'cloudInit', 'cloudReport', 'cloudStop'].includes(type)) {
-        result = { success: false, error: '内置离线后端不支持实时监控或云端数据收集。' }
+      } else if (['cloudInit', 'cloudReport', 'cloudStop'].includes(type)) {
+        result = { success: false, error: '内置后端不支持云端数据收集。' }
       } else if (type === 'getLastInitError') {
         result = lastError
       } else {
-        client ||= new LocalBackendClient(join(process.env.WEFLOW_USER_DATA_PATH || process.cwd(), 'backend'))
-        result = await client.call(type, payload)
+        if (!client) {
+          client = new LocalBackendClient(join(process.env.WEFLOW_USER_DATA_PATH || process.cwd(), 'backend'))
+          attachClientEvents(client)
+        }
+        result = await client.call(type, payload, undefined, typeof id === 'number' ? id : undefined)
         if (result?.success === false) {
           lastError = describeError(result)
           // Existing WeFlow renderers read `error` directly. Keep the structured

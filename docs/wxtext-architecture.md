@@ -1,5 +1,7 @@
 # 架构与 Windows 适配边界
 
+本文描述 wxtext 的现有离线采集、复制和解密内核。WeFlow 的新在线方案使用 SQLCipher 引擎的读事务与 WAL 协调，不扩展本文的离线 WAL 重放器；参见 [在线架构](live-architecture.md) 和 [接入规格](live-spec.md)。
+
 ```text
 cli → ExportService
           ├─ WindowsSource → KeyMatcher → StateStore (DPAPI)

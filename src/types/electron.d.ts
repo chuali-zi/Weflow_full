@@ -696,8 +696,13 @@ export interface ElectronAPI {
     resolveDir: (dbPath: string, accountId?: string) => Promise<{ dbPathExists: boolean; accountDir?: string }>
   }
   wcdb: {
-    testConnection: (dbPath: string, hexKey: string, accountId: string) => Promise<{ success: boolean; error?: string; sessionCount?: number }>
-    open: (dbPath: string, hexKey: string, accountId: string) => Promise<boolean>
+    testConnection: (dbPath: string, hexKey: string, accountId: string, mode?: 'snapshot' | 'live') => Promise<{ success: boolean; error?: string; sessionCount?: number; mode?: 'snapshot' | 'live' }>
+    open: (dbPath: string, hexKey: string, accountId: string, mode?: 'snapshot' | 'live') => Promise<boolean>
+    getConnectionStatus: () => Promise<{ mode?: 'snapshot' | 'live'; state?: string; code?: string | number; complete?: boolean; missingDatabases?: string[]; connectionId?: string; revision?: number; [key: string]: unknown }>
+    setReadMode: {
+      (dataDir: string, mode: 'snapshot' | 'live'): Promise<{ success: boolean; error?: string; mode?: 'snapshot' | 'live' }>
+      (dbPath: string, accountId: string, mode: 'snapshot' | 'live'): Promise<{ success: boolean; error?: string; mode?: 'snapshot' | 'live' }>
+    }
     close: () => Promise<boolean>
 
   }
@@ -1153,6 +1158,7 @@ export interface ElectronAPI {
       error?: string
     }>
     onWcdbChange: (callback: (event: any, data: { type: string; json: string }) => void) => () => void
+    onDatabaseStatus: (callback: (status: { mode?: 'snapshot' | 'live'; state?: string; code?: string | number; complete?: boolean; missingDatabases?: string[]; connectionId?: string; revision?: number; [key: string]: unknown }) => void) => () => void
   }
   biz: {
     listAccounts: (account?: string) => Promise<any[]>

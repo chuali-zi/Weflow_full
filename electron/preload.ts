@@ -177,10 +177,13 @@ contextBridge.exposeInMainWorld('electronAPI', {
 
   // WCDB 数据库
   wcdb: {
-    testConnection: (dbPath: string, hexKey: string, accountId: string) =>
-      ipcRenderer.invoke('wcdb:testConnection', dbPath, hexKey, accountId),
-    open: (dbPath: string, hexKey: string, accountId: string) =>
-      ipcRenderer.invoke('wcdb:open', dbPath, hexKey, accountId),
+    testConnection: (dbPath: string, hexKey: string, accountId: string, mode?: 'snapshot' | 'live') =>
+      ipcRenderer.invoke('wcdb:testConnection', dbPath, hexKey, accountId, mode),
+    open: (dbPath: string, hexKey: string, accountId: string, mode?: 'snapshot' | 'live') =>
+      ipcRenderer.invoke('wcdb:open', dbPath, hexKey, accountId, mode),
+    getConnectionStatus: () => ipcRenderer.invoke('wcdb:getConnectionStatus'),
+    setReadMode: (dataDirOrDbPath: string, modeOrAccountId: 'snapshot' | 'live' | string, mode?: 'snapshot' | 'live') =>
+      ipcRenderer.invoke('wcdb:setReadMode', dataDirOrDbPath, modeOrAccountId, mode),
     close: () => ipcRenderer.invoke('wcdb:close'),
 
   },
@@ -349,6 +352,11 @@ contextBridge.exposeInMainWorld('electronAPI', {
     onWcdbChange: (callback: (event: any, data: { type: string; json: string }) => void) => {
       ipcRenderer.on('wcdb-change', callback)
       return () => ipcRenderer.removeListener('wcdb-change', callback)
+    },
+    onDatabaseStatus: (callback: (status: Record<string, unknown>) => void) => {
+      const listener = (_event: unknown, status: Record<string, unknown>) => callback(status)
+      ipcRenderer.on('database-status', listener)
+      return () => ipcRenderer.removeListener('database-status', listener)
     }
   },
 

@@ -2,12 +2,13 @@
 import { basename, dirname, extname, join, resolve as resolvePath } from 'path'
 import { fileURLToPath, pathToFileURL } from 'url'
 import { existsSync, mkdirSync, readdirSync, readFileSync, statSync } from 'fs'
-import { writeFile, rename, rm, readdir, appendFile, readFile } from 'fs/promises'
+import { writeFile, rename, rm, readdir, appendFile, readFile, open as openFile } from 'fs/promises'
 import { homedir, tmpdir } from 'os'
 import crypto from 'crypto'
 import { ConfigService } from './config'
 import { wcdbService } from './wcdbService'
 import { decryptDatViaNativeAsync, nativeAddonLocation } from './nativeImageDecrypt'
+import { KeyProviderService } from './keyProviderService'
 
 // 获取 ffmpeg-static 的路径
 function getStaticFfmpegPath(): string | null {
@@ -126,6 +127,40 @@ export class ImageDecryptService {
   private readonly maxCorruptedCacheChecks = 6000
   private cacheMutationQueue: Promise<void> = Promise.resolve()
   private cacheClearDepth = 0
+  private imageKeyRequests = new Map<string, Promise<{ success: boolean; error?: string }>>()
+  private imageKeyAttemptAt = new Map<string, number>()
+
+  private async ensureImageKeys(context: ImageCacheOperationContext, force: boolean): Promise<{ success: boolean; error?: string }> {
+    const configured = this.getConfiguredImageKeys()
+    if (configured.aesKey.trim().length >= 16) return { success: true }
+    const scope = context.accountScope
+    const pending = this.imageKeyRequests.get(scope)
+    if (pending) return pending
+    if (!force && Date.now() - (this.imageKeyAttemptAt.get(scope) || 0) < 60_000) {
+      return { success: false, error: '尚未获取图片密钥，请在微信打开一张图片后点击重试，或在设置中获取图片密钥。' }
+    }
+    this.imageKeyAttemptAt.set(scope, Date.now())
+    const accountId = String(this.runtimeConfig?.myAccountId || this.configService.get('myAccountId') || '')
+    const request = (async () => {
+      try {
+        const result = await new KeyProviderService().autoGetImageKey(context.accountDir || undefined, undefined, accountId)
+        if (!result.success || !result.aesKey || result.xorKey === undefined) return { success: false, error: result.error || '图片密钥获取失败。' }
+        if (!this.isOperationCurrent(context)) return { success: false, error: '账号已切换，请重试。' }
+        const configs = this.configService.get('accountConfigs') || {}
+        this.configService.set('accountConfigs', { ...configs, [accountId]: {
+          ...configs[accountId], imageAesKey: result.aesKey, imageXorKey: result.xorKey, updatedAt: Date.now()
+        } })
+        if (this.runtimeConfig) Object.assign(this.runtimeConfig, { imageAesKey: result.aesKey, imageXorKey: result.xorKey })
+        return { success: true }
+      } catch (error) {
+        return { success: false, error: error instanceof Error ? error.message : '图片密钥获取失败。' }
+      } finally {
+        this.imageKeyRequests.delete(scope)
+      }
+    })()
+    this.imageKeyRequests.set(scope, request)
+    return request
+  }
 
   private shouldEmitImageEvents(payload?: { suppressEvents?: boolean }): boolean {
     if (payload?.suppressEvents === true) return false
@@ -678,6 +713,18 @@ export class ImageDecryptService {
       }
 
       // 优先使用当前 accountId 对应的密钥，找不到则回退到全局配置
+      // V2 needs an account image key distinct from database and CDN keys.
+      const datHeader = Buffer.alloc(6)
+      const datFile = await openFile(datPath, 'r')
+      try { await datFile.read(datHeader, 0, 6, 0) } finally { await datFile.close() }
+      if (this.getDatVersion(datHeader) === 2) {
+        const keyResult = await this.ensureImageKeys(context, payload.force === true)
+        if (!keyResult.success) {
+          this.emitDecryptProgress(payload, cacheKey, 'failed', 100, 'error', keyResult.error)
+          return { success: false, error: keyResult.error, failureKind: 'decrypt_failed' }
+        }
+        if (!this.isOperationCurrent(context)) return this.getStaleOperationResult()
+      }
       const imageKeys = this.getConfiguredImageKeys()
       const xorKeyRaw = imageKeys.xorKey
       // 支持十六进制格式（如 0x53）和十进制格式
@@ -701,17 +748,14 @@ export class ImageDecryptService {
       const aesKeyText = typeof aesKeyRaw === 'string' ? aesKeyRaw.trim() : ''
       const aesKeyForNative = aesKeyText || undefined
 
-      this.logInfo('开始解密DAT文件', { datPath, xorKey, hasAesKey: Boolean(aesKeyForNative) })
+      this.logInfo('开始解密DAT文件', { datPath, hasAesKey: Boolean(aesKeyForNative) })
       this.emitDecryptProgress(payload, cacheKey, 'decrypting', 58, 'running')
       const nativeResult = await this.tryDecryptDatWithNative(datPath, xorKey, aesKeyForNative)
       if (!this.isOperationCurrent(context)) return this.finalizeOperationResult(context, this.getStaleOperationResult())
       if (!nativeResult) {
-        const notConfigured = !nativeAddonLocation()
-        const message = notConfigured
-          ? '未配置媒体解密实现，请在设置中指定第三方插件路径'
-          : '媒体解密失败，请检查密钥配置'
+        const message = '图片解密失败，请检查图片密钥，或等待微信完成图片下载后重试。'
         this.emitDecryptProgress(payload, cacheKey, 'failed', 100, 'error', message)
-        return { success: false, error: message, failureKind: 'not_found' }
+        return { success: false, error: message, failureKind: 'decrypt_failed' }
       }
       let decrypted: Buffer = nativeResult.data
       this.emitDecryptProgress(payload, cacheKey, 'decrypting', 78, 'running')
@@ -2225,6 +2269,7 @@ export class ImageDecryptService {
 
       for (const candidate of candidates) {
         const ext = this.detectImageExtension(candidate)
+        if (candidate.subarray(0, 4).toString('ascii') === 'wxgf') return { data: candidate, ext: '.wxgf', isWxgf: true }
         if (ext) return { data: candidate, ext, isWxgf: false }
       }
     } catch (error) {
@@ -2249,6 +2294,7 @@ export class ImageDecryptService {
     const payload = data.subarray(0x0f)
     const aesSize = this.readInt32LeSafe(header, 6)
     const xorSize = this.readInt32LeSafe(header, 10)
+    if (aesSize < 0) throw new Error('invalid aes size')
     const remainder = ((aesSize % 16) + 16) % 16
     const alignedAesSize = aesSize + (16 - remainder)
     if (alignedAesSize > payload.length) throw new Error('invalid aes size')
@@ -2260,6 +2306,7 @@ export class ImageDecryptService {
       const decipher = crypto.createDecipheriv('aes-128-ecb', aesKey, Buffer.alloc(0))
       decipher.setAutoPadding(false)
       plainAes = this.strictRemovePkcs7Padding(Buffer.concat([decipher.update(aesData), decipher.final()]))
+      if (plainAes.length !== aesSize) throw new Error('invalid aes plaintext size')
     }
 
     const remaining = payload.subarray(alignedAesSize)

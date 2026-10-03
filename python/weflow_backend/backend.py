@@ -1,6 +1,7 @@
 """Local JSON-RPC queries over authenticated, private WeChat snapshots."""
 from collections import Counter
 from datetime import datetime
+from functools import wraps
 import hashlib
 import heapq
 import itertools
@@ -12,6 +13,8 @@ import shutil
 import sqlite3
 import tempfile
 import uuid
+import threading
+import time
 
 from wxtext.adapter import decode_text, message_table, quoted, tables, columns
 from wxtext.cipher import PROFILE, decrypt_database, open_readonly, verify_key
@@ -20,6 +23,7 @@ from wxtext.snapshot import inventory, snapshot
 from wxtext.state import StateStore, atomic_write
 from wxtext.wal import apply_wal
 from wxtext.windows import WindowsSource, discover_data_dir_records
+from .live import connect as live_connect, data_version as live_data_version, close_all as close_live
 
 
 def account_root(value=None, account_id=None):
@@ -62,6 +66,47 @@ def json_row(row):
     return {name: json_value(row[name]) for name in row.keys()}
 
 
+def message_signature(row):
+    return hashlib.sha256(json.dumps(
+        [row["message_content"], row["sender_username"], row["create_time"], row["local_type"]],
+        ensure_ascii=False, separators=(",", ":")).encode()).digest()
+
+
+def live_query(method):
+    """The same bounded read applies to RPC and direct CLI calls."""
+    @wraps(method)
+    def query(self, *args, **kwargs):
+        if self.mode != "live":
+            return method(self, *args, **kwargs)
+        self._pending_events.extend(self.pollLiveChanges())
+        if self.live_missing:
+            raise ToolError("KEY_NOT_FOUND", "核心数据库不完整，请补齐密钥后重试。",
+                            details={"missing_databases": self.live_missing})
+        if self._last_status_state not in {"ready", "degraded"}:
+            raise ToolError("SOURCE_REPLACED", "源数据库正在重新连接，请稍后重试。")
+        own_budget = self._deadline is None
+        if own_budget:
+            self.begin_request(None, 2000)
+        try:
+            result = method(self, *args, **kwargs)
+            self._check_limits()
+            return result
+        except ToolError:
+            raise
+        except Exception as error:
+            self._check_limits()
+            message = str(error).casefold()
+            if "locked" in message or "busy" in message:
+                raise ToolError("LIVE_BUSY", "数据库暂时繁忙，请稍后重试。") from error
+            if "interrupt" in message:
+                raise ToolError("LIVE_READ_TIMEOUT", "在线读取超过时间限制。") from error
+            raise
+        finally:
+            if own_budget:
+                self.end_request()
+    return query
+
+
 class Backend:
     def __init__(self, state_dir, windows=None, state=None, progress=lambda message: None):
         self.state = state or StateStore(Path(state_dir))
@@ -75,11 +120,76 @@ class Backend:
         self.next_cursor = 0
         self.session_cache = None
         self.stats_cache = {}
+        self.mode = "snapshot"
+        self.connection_id = None
+        self.revision = 0
+        self.monitor_enabled = True
+        self.live_baseline = {}
+        self.live_missing = []
+        self.live_engine = "sqlcipher3"
+        self._cancelled = set()
+        self._request_lock = threading.Lock()
+        self._request_id = None
+        self._deadline = None
+        self._last_inventory_check = 0.0
+        self._known_live_files = set()
+        self._known_live_salts = {}
+        self.live_keys = {}
+        self._last_status_state = None
+        self._pending_events = []
+        self._live_identities = {}
+        self._retry_index = 0
+        self._reconnect_at = 0.0
+        self._recovery_code = None
+        self.live_unavailable = []
 
     def source(self):
         if self.windows is None:
             self.windows = WindowsSource()
         return self.windows
+
+    def getImageKeys(self, accountDir=None, accountId=None, refresh=False, **_):
+        from .image_keys import acquire
+        root = account_root(accountDir or self.state.settings().get('data_dir'), accountId)
+        return acquire(root.parent, self.state, self.source(), self.progress, refresh)
+
+    @live_query
+    def resolveImageHardlink(self, md5, accountDir=None, **_):
+        if not re.fullmatch(r'[0-9a-fA-F]{32}', md5 or ''):
+            return {'success': False, 'error': '图片标识无效。'}
+        account = self.root.parent
+        if accountDir and account_root(accountDir) != self.root:
+            return {'success': False, 'error': '图片账号与已连接账号不一致。'}
+        relative = next((name for name in self.meta['files'] if Path(name).name == 'hardlink.db'), None)
+        if not relative:
+            return {'success': False, 'error': '没有图片附件索引。'}
+        conn = self.connection(relative)
+        rows = conn.execute('''SELECT h.file_name, h.type, d1.username AS dir1, d2.username AS dir2
+            FROM image_hardlink_info_v4 h
+            LEFT JOIN dir2id d1 ON d1.rowid=h.dir1
+            LEFT JOIN dir2id d2 ON d2.rowid=h.dir2
+            WHERE h.md5=? COLLATE NOCASE ORDER BY h.modify_time DESC LIMIT 30''', (md5,)).fetchall()
+        found = []
+        for row in rows:
+            parts = [row['dir1'], row['dir2'], row['file_name']]
+            if any(not part or '/' in part or '\\' in part or part in {'.', '..'} for part in parts):
+                continue
+            path = account / 'msg' / 'attach' / parts[0] / parts[1] / 'Img' / parts[2]
+            if path.is_file():
+                name = parts[2].lower()
+                rank = 0 if name.endswith('_h.dat') else 2 if name.endswith('_t.dat') else 1
+                found.append((rank, path, row['type']))
+        if not found:
+            return {'success': False, 'error': '图片尚未下载到本机。'}
+        _, path, kind = min(found, key=lambda item: item[0])
+        return {'success': True, 'data': {'file_name': path.name, 'full_path': str(path), 'type': kind}}
+
+    def resolveImageHardlinkBatch(self, requests, **_):
+        rows = []
+        for index, request in enumerate(requests):
+            rows.append({'index': index, 'md5': request.get('md5'),
+                         **self.resolveImageHardlink(**request)})
+        return {'success': True, 'rows': rows}
 
     def active_path(self, root):
         token = hashlib.sha256(os.path.normcase(str(root.resolve())).encode()).hexdigest()
@@ -291,14 +401,196 @@ class Backend:
         return {"success": True, **meta,
                 "key": keys["contact/contact.db"].secret.hex(), "dbPath": str(root.parent.parent)}
 
-    def status(self, dataDir=None, **_):
+    def status(self, dataDir=None, mode=None, **_):
         root = account_root(dataDir)
+        selected = self.state.mode(root, mode)
+        if selected == "live":
+            if self.root == root and self.mode == "live":
+                return self.getConnectionStatus()
+            return {"success": True, "mode": "live", "state": "disconnected",
+                    "complete": False, "missingDatabases": [], "connectionId": None,
+                    "revision": 0}
         try:
             meta = self.read_active(root)
         except ToolError:
             return {"success": True, "ready": False}
         return {"success": True, "ready": True, "capturedAt": meta["capturedAt"],
-                "dataDir": str(root), "accountId": meta["accountId"]}
+                "dataDir": str(root), "accountId": meta["accountId"], "mode": "snapshot"}
+
+    def getConnectionStatus(self, dataDir=None, mode=None, **_):
+        if self.mode == "live" and self.meta is not None:
+            return self._status_payload()
+        if self.mode == "snapshot" and self.meta is not None:
+            return {"success": True, "mode": "snapshot", "state": "ready",
+                    "complete": True, "missingDatabases": [], "connectionId": None,
+                    "revision": 0, "engine": "sqlite3",
+                    "capabilities": {"live": False, "monitor": False}}
+        selected_root = dataDir or self.state.settings().get("data_dir")
+        selected_mode = self.state.mode(account_root(selected_root), mode) if selected_root else self.mode
+        return {"success": True, "mode": selected_mode, "state": "disconnected",
+                "complete": False, "missingDatabases": [], "connectionId": self.connection_id,
+                "revision": self.revision, "engine": "sqlite3"}
+
+    def connectionConfig(self, dataDir=None, mode=None, **_):
+        root = account_root(dataDir or self.root)
+        selected = self.state.mode(root, mode)
+        if selected == "live":
+            if self.root != root or self.mode != "live":
+                self.open(str(root), mode="live")
+            key = self.state.load_keys(root).get("contact/contact.db")
+            return {"success": True, "mode": "live", "dbPath": str(root.parent.parent),
+                    "dataDir": str(root), "accountId": self.owner,
+                    "key": key.secret.hex() if key else "",
+                    **self._status_payload()}
+        result = self.snapshotConfig(str(root))
+        result["mode"] = "snapshot"
+        return result
+
+    def setReadMode(self, dataDir, mode, **_):
+        root = account_root(dataDir)
+        if mode not in {"snapshot", "live"}:
+            raise ToolError("INVALID_MODE", "读取模式必须是 snapshot 或 live。")
+        # Validation happens before settings are changed.  An error therefore
+        # leaves the previous mode untouched.
+        self.open(str(root), mode=mode)
+        self.state.set_mode(root, mode)
+        return {"success": True, "mode": mode, **self.getConnectionStatus()}
+
+    def setMonitor(self, enabled=True, **_):
+        if self.mode != "live":
+            raise ToolError("FEATURE_UNAVAILABLE", "snapshot 模式不支持实时监控。",
+                            details={"mode": "snapshot"})
+        self.monitor_enabled = bool(enabled)
+        events = self.pollLiveChanges() if self.monitor_enabled else []
+        return {"success": True, "enabled": self.monitor_enabled, "events": events,
+                **self._status_payload()}
+
+    def pollLiveChanges(self):
+        if self.mode != "live" or self.meta is None or not self.monitor_enabled:
+            return []
+        changed = []
+        errors = []
+        now = time.monotonic()
+        if time.monotonic() - self._last_inventory_check >= 10:
+            self._last_inventory_check = time.monotonic()
+            try:
+                current = set(inventory(self.root))
+                if current != self._known_live_files:
+                    self._known_live_files = current
+                    errors.append("inventory")
+                for name in current:
+                    path = self.root / name
+                    with path.open("rb") as stream:
+                        salt = stream.read(PROFILE.salt_size)
+                    stat = path.stat()
+                    identity = (stat.st_dev, stat.st_ino, salt)
+                    if self._live_identities.get(name) != identity:
+                        errors.append("identity")
+            except Exception:
+                errors.append("inventory")
+        for name, connection in list(self.connections.items()):
+            try:
+                value = live_data_version(connection)
+                previous = self.live_baseline.get(name)
+                self.live_baseline[name] = value
+                if previous is not None and value != previous:
+                    changed.append(name)
+            except Exception:
+                if name in self._known_live_files:
+                    errors.append(name)
+                else:
+                    connection.close()
+                    self.connections.pop(name, None)
+                    self.live_baseline.pop(name, None)
+                    if name not in self.live_unavailable:
+                        self.live_unavailable.append(name)
+        events = []
+        if changed:
+            self.revision += 1
+            self.session_cache = None
+            self.stats_cache.clear()
+            events.append({"type": "change", "payload": {
+                "table": "Session", "reason": "database_commit", "mode": "live",
+                "accountId": self.owner, "connectionId": self.connection_id,
+                "revision": self.revision, "scope": "account", "databases": changed,
+                "requiresReload": True}})
+        if errors and self._recovery_code is None:
+            self._recovery_code = "SOURCE_REPLACED"
+            self._retry_index = 0
+            self._reconnect_at = now + 1
+            self._last_status_state = "reconnecting"
+            self.session_cache = None
+            self.stats_cache.clear()
+            events.append({"type": "connection-status", "payload":
+                           self._status_payload("reconnecting", self._recovery_code, 1)})
+        if self._recovery_code and now >= self._reconnect_at:
+            try:
+                affected = sorted(self._known_live_files)
+                self._open_live(self.root)
+                events.append({"type": "connection-status", "payload": self._status_payload()})
+                self.revision += 1
+                events.append({"type": "change", "payload": {
+                    "table": "Session", "reason": "reconnected", "mode": "live",
+                    "accountId": self.owner, "connectionId": self.connection_id,
+                    "revision": self.revision, "scope": "account", "databases": affected,
+                    "requiresReload": True}})
+            except (ToolError, OSError) as error:
+                state = "needs_key" if isinstance(error, ToolError) and error.code == "KEY_NOT_FOUND" else "reconnecting"
+                if state == "needs_key":
+                    self.live_missing = list((error.details or {}).get("missing_databases", []))
+                self._recovery_code = error.code if isinstance(error, ToolError) else "SOURCE_REPLACED"
+                delay = (1, 2, 5)[min(self._retry_index, 2)]
+                self._retry_index += 1
+                self._reconnect_at = now + delay
+                if state != self._last_status_state:
+                    events.append({"type": "connection-status", "payload":
+                                   self._status_payload(state, self._recovery_code, delay)})
+                self._last_status_state = state
+        return events
+
+    def drain_events(self):
+        events, self._pending_events = self._pending_events, []
+        return events
+
+    def request_cancel(self, request_id):
+        if request_id is not None:
+            with self._request_lock:
+                self._cancelled.add(str(request_id))
+
+    def cancel(self, requestId=None, **_):
+        # The input thread sets the flag immediately. By the time this queued
+        # acknowledgement runs, the target has finished; don't retain its ID.
+        if requestId is not None:
+            with self._request_lock:
+                self._cancelled.discard(str(requestId))
+        return {"success": True, "requestId": requestId}
+
+    def begin_request(self, request_id=None, timeout_ms=None):
+        self._request_id = None if request_id is None else str(request_id)
+        if timeout_ms is None and self.mode == "live":
+            timeout_ms = 2000
+        self._deadline = (time.monotonic() + max(1, int(timeout_ms)) / 1000
+                          if timeout_ms else None)
+        for connection in self.connections.values():
+            try:
+                connection.set_progress_handler(self._progress, 1000)
+            except Exception:
+                pass
+
+    def end_request(self):
+        for connection in self.connections.values():
+            try:
+                connection.set_progress_handler(None, 0)
+            except Exception:
+                pass
+        with self._request_lock:
+            self._cancelled.discard(self._request_id)
+        self._request_id = self._deadline = None
+
+    def _progress(self):
+        with self._request_lock:
+            cancelled = self._request_id in self._cancelled if self._request_id else False
+        return 1 if (cancelled or (self._deadline is not None and time.monotonic() >= self._deadline)) else 0
 
     def snapshotConfig(self, dataDir, **_):
         root = account_root(dataDir)
@@ -311,7 +603,9 @@ class Backend:
 
     def exportRaw(self, request, **_):
         root = self.export_account_root(request)
-        self.open(str(root))
+        requested_mode = (request.get("mode") or
+                          self.state.mode(root, None))
+        self.open(str(root), mode=requested_mode)
         output = Path(request.get("exportsDir") or request["outputDir"]).resolve()
         if output.is_relative_to(self.root.parent):
             raise ToolError("UNSAFE_PATH", "导出目录不能位于微信账号目录中。")
@@ -324,6 +618,8 @@ class Backend:
             begin //= 1000
         if end > 10_000_000_000:
             end //= 1000
+        if self.mode == "live":
+            return self._export_live(request, output, begin, end)
         for session_id in request["sessionIds"]:
             self.progress(f"正在导出 {session_id}")
             path = output / (hashlib.md5(session_id.encode(), usedforsecurity=False).hexdigest() + ".jsonl")
@@ -337,6 +633,90 @@ class Backend:
         return {"success": True, "successCount": len(paths), "failCount": 0,
                 "failedSessionIds": [], "failedSessionErrors": {}, "sessionOutputPaths": paths,
                 "rawSessionOutputPaths": paths, "rawExportManifests": manifests}
+
+    def _export_live(self, request, output, begin, end):
+        # Capture each database once in a fixed, bounded transaction. All
+        # source transactions end before merging/deduplicating the spool.
+        started = datetime.now().astimezone().isoformat(timespec="milliseconds")
+        staging = Path(tempfile.mkdtemp(prefix=".weflow-live-", dir=output))
+        captures, paths, manifests = [], {}, {}
+        session_ids = list(dict.fromkeys(request["sessionIds"]))
+        spools = {sid: [] for sid in session_ids}
+        ascending = request.get("ascending", True)
+        previous_deadline = self._deadline
+        try:
+            for relative in self.meta["files"]:
+                if not re.fullmatch(r"message/message_\d+\.db", relative):
+                    continue
+                connection = self.connection(relative)
+                captured_start = datetime.now().astimezone().isoformat(timespec="milliseconds")
+                self._deadline = time.monotonic() + 5
+                connection.set_progress_handler(self._progress, 1000)
+                try:
+                    with self._transaction(connection):
+                        catalog = tables(connection)
+                        for sid in session_ids:
+                            table = catalog.get(message_table(sid).lower())
+                            if not table:
+                                continue
+                            self.progress(f"正在捕获 {relative}")
+                            token = hashlib.md5(sid.encode(), usedforsecurity=False).hexdigest()
+                            spool = staging / (Path(relative).stem + "-" + token + ".capture")
+                            with spool.open("w", encoding="utf-8", newline="\n") as stream:
+                                for row in self.shard_messages(relative, connection, table, ascending, begin, end):
+                                    self._check_limits()
+                                    stream.write(json.dumps(row, ensure_ascii=False) + "\n")
+                            spools[sid].append(spool)
+                        self._check_limits()
+                except Exception:
+                    self._check_limits()
+                    raise
+                finally:
+                    self._deadline = previous_deadline
+                    connection.set_progress_handler(self._progress if self._request_id or self._deadline else None, 1000)
+                captures.append({"database": relative, "captureStartedAt": captured_start,
+                                 "captureFinishedAt": datetime.now().astimezone().isoformat(timespec="milliseconds")})
+            def captured_rows(path):
+                with path.open(encoding="utf-8") as stream:
+                    for line in stream:
+                        yield json.loads(line)
+            key = lambda row: (int(row["create_time"]), int(row["sort_seq"]), int(row["local_id"]), row["_db_path"])
+            for sid in session_ids:
+                name = hashlib.md5(sid.encode(), usedforsecurity=False).hexdigest() + ".jsonl"
+                published = staging / name
+                seen, count = {}, 0
+                with published.open("w", encoding="utf-8", newline="\n") as stream:
+                    for row in heapq.merge(*(captured_rows(path) for path in spools[sid]), key=key, reverse=not ascending):
+                        self._check_limits()
+                        server = row["server_id"]
+                        if server != "0":
+                            signature = message_signature(row)
+                            if server in seen:
+                                if seen[server] != signature:
+                                    raise ToolError("MESSAGE_CONFLICT", "同一消息 ID 在分库中出现冲突。")
+                                continue
+                            seen[server] = signature
+                        stream.write(json.dumps(row, ensure_ascii=False) + "\n")
+                        count += 1
+                paths[sid] = str(output / name)
+                manifests[sid] = {"path": paths[sid], "rows": count, "bytes": published.stat().st_size,
+                                  "consistency": "per_database", "databases": captures}
+            self._check_limits()
+            # Staging and output share a volume, including the desktop Worker's
+            # system temp directory. Capture/convert failure publishes nothing.
+            for sid in session_ids:
+                destination = Path(paths[sid])
+                (staging / destination.name).replace(destination)
+            return {"success": True, "mode": "live", "successCount": len(paths), "failCount": 0,
+                    "failedSessionIds": [], "failedSessionErrors": {}, "sessionOutputPaths": paths,
+                    "rawSessionOutputPaths": paths, "rawExportManifests": manifests,
+                    "consistency": "per_database", "databases": captures,
+                    "captureStartedAt": started,
+                    "captureFinishedAt": datetime.now().astimezone().isoformat(timespec="milliseconds"),
+                    "connectionId": self.connection_id, "revision": self.revision}
+        finally:
+            self._deadline = previous_deadline
+            shutil.rmtree(staging, ignore_errors=True)
 
     @staticmethod
     def export_account_root(request):
@@ -357,19 +737,141 @@ class Backend:
                             "请在原界面重新选择正确的微信账号目录。", {"sessionDb": str(path)})
         return root.resolve()
 
-    def open(self, accountDir, hexKey="", **_):
+    def _status_payload(self, state=None, code=None, retry_after=None):
+        state = state or (self._last_status_state if self._recovery_code else
+                         "needs_key" if self.live_missing else "degraded" if self.live_unavailable else
+                         "ready" if self.meta is not None else "disconnected")
+        payload = {"success": True, "mode": self.mode, "state": state,
+                   "complete": not self.live_missing,
+                   "missingDatabases": list(self.live_missing),
+                   "unavailableDatabases": list(self.live_unavailable),
+                   "connectionId": self.connection_id, "revision": self.revision,
+                   "engine": self.live_engine if self.mode == "live" else "sqlite3",
+                   "capabilities": {"live": self.mode == "live", "monitor": self.mode == "live"}}
+        if code:
+            payload["code"] = code
+        if retry_after is not None:
+            payload["retryAfter"] = retry_after
+        return payload
+
+    def _check_limits(self):
+        if self._request_id:
+            with self._request_lock:
+                if self._request_id in self._cancelled:
+                    raise ToolError("CANCELLED", "操作已取消。")
+        if self._deadline is not None and time.monotonic() >= self._deadline:
+            raise ToolError("LIVE_READ_TIMEOUT", "在线读取超过时间限制。")
+
+    def _open_live(self, root):
+        keys = self.state.load_keys(root)
+        required = set(inventory(root))
+        missing = sorted(required - set(keys))
+        if missing:
+            raise ToolError("KEY_NOT_FOUND", "尚未取得全部核心聊天数据库密钥。",
+                            "请先获取密钥；在线读取不会回退到旧副本。",
+                            {"missing_databases": missing})
+        files = sorted(name for name in keys if (root / name).is_file() and
+                       name.lower().endswith(".db"))
+        # Always include the required set even when a key cache has an old entry.
+        files = sorted(set(files) | required)
+        opened = {}
+        for relative in files:
+            if relative not in required:
+                continue
+            if relative not in keys:
+                continue
+            try:
+                opened[relative] = live_connect(root / relative, keys[relative])
+            except BaseException as error:
+                close_live(opened)
+                if isinstance(error, ToolError) and error.code == "LIVE_AUTH_FAILED":
+                    raise ToolError("KEY_NOT_FOUND", "源库认证失败，请重新获取对应密钥。",
+                                    details={"missing_databases": [relative]}) from error
+                raise
+        if "contact/contact.db" not in opened:
+            close_live(opened)
+            raise ToolError("KEY_NOT_FOUND", "联系人数据库密钥不存在。")
+        try:
+            opened["contact/contact.db"].execute("SELECT username FROM contact LIMIT 1").fetchone()
+            for name in required - {"contact/contact.db"}:
+                opened[name].execute("SELECT user_name FROM Name2Id LIMIT 1").fetchone()
+        except Exception:
+            close_live(opened)
+            raise ToolError("UNSUPPORTED_SCHEMA", "在线核心数据库结构尚未适配。") from None
+        self.close()
+        self.root = root
+        self.owner = clean_id(root.parent.name)
+        self.meta = {"directory": str(root), "dataDir": str(root),
+                     "accountId": self.owner, "files": sorted(files)}
+        self.connections = opened
+        self.live_keys = keys
+        self.mode = "live"
+        self._last_status_state = "ready"
+        self._recovery_code = None
+        self._retry_index = 0
+        self._reconnect_at = 0.0
+        self.connection_id = uuid.uuid4().hex
+        self.revision = 0
+        self.live_missing = sorted(required - set(opened))
+        self._known_live_files = set(required)
+        self._known_live_salts = {}
+        self._live_identities = {}
+        for name in required:
+            try:
+                with (root / name).open("rb") as stream:
+                    self._known_live_salts[name] = stream.read(PROFILE.salt_size)
+                stat = (root / name).stat()
+                self._live_identities[name] = (stat.st_dev, stat.st_ino, self._known_live_salts[name])
+            except OSError:
+                pass
+        self._last_inventory_check = time.monotonic()
+        self.live_baseline = {name: live_data_version(conn) for name, conn in opened.items()}
+        for connection in opened.values():
+            if self._deadline is not None:
+                connection.set_progress_handler(self._progress, 1000)
+        # Verify a real table query after authentication.
+        with self._transaction(self.connections["contact/contact.db"]):
+            self.connections["contact/contact.db"].execute("SELECT 1 FROM sqlite_master LIMIT 1").fetchone()
+        return True
+
+    def _transaction(self, connection):
+        from .live import read_transaction
+        if self.mode == "live":
+            return read_transaction(connection)
+        from contextlib import nullcontext
+        return nullcontext(connection)
+
+    def open(self, accountDir, hexKey="", mode=None, **_):
         root = account_root(accountDir)
+        selected_mode = self.state.mode(root, mode)
+        if selected_mode == "live":
+            result = self._open_live(root)
+            return result
         meta = self.ensure_snapshot(root)
         if self.meta and meta["directory"] == self.meta["directory"] and root == self.root:
             return True
         self.close()
         self.root, self.meta, self.owner = root, meta, meta["accountId"]
+        self.mode = "snapshot"
+        self.connection_id = None
+        self.revision = 0
         # Opening the contact database verifies the snapshot is usable.
         self.connection("contact/contact.db")
         return True
 
-    def testConnection(self, accountDir, hexKey="", **_):
+    def testConnection(self, accountDir, hexKey="", mode=None, **_):
         root = account_root(accountDir)
+        selected_mode = self.state.mode(root, mode)
+        if selected_mode == "live":
+            # Probe on an isolated Backend so testing another account cannot
+            # close the active GUI connection.
+            probe = Backend(self.state.root, windows=self.windows, state=self.state,
+                            progress=self.progress)
+            try:
+                probe._open_live(root)
+                return {"success": True, **probe._status_payload()}
+            finally:
+                probe.close()
         meta = self.ensure_snapshot(root, update_if_changed=True)
         connection = open_readonly(Path(meta["directory"]) / "contact/contact.db")
         try:
@@ -436,6 +938,12 @@ class Backend:
         self.connections.clear()
         self.root = self.meta = self.owner = self.session_cache = None
         self.stats_cache.clear()
+        self.live_baseline.clear()
+        self.live_missing = []
+        self.live_keys = {}
+        self._last_status_state = None
+        self._recovery_code = None
+        self.live_unavailable = []
         return {"success": True}
 
     def connection(self, relative):
@@ -444,7 +952,21 @@ class Backend:
         if relative not in self.meta["files"]:
             raise ToolError("DATABASE_UNAVAILABLE", "该数据库未包含在当前副本中。", details={"file": relative})
         if relative not in self.connections:
-            self.connections[relative] = open_readonly(Path(self.meta["directory"]) / relative)
+            if self.mode == "snapshot":
+                self.connections[relative] = open_readonly(Path(self.meta["directory"]) / relative)
+            elif relative in self.live_keys:
+                try:
+                    self.connections[relative] = live_connect(self.root / relative, self.live_keys[relative])
+                except ToolError:
+                    if relative not in self.live_unavailable:
+                        self.live_unavailable.append(relative)
+                        self._pending_events.append({"type": "connection-status", "payload": self._status_payload()})
+                    raise
+                self.live_baseline[relative] = live_data_version(self.connections[relative])
+                if self._deadline is not None:
+                    self.connections[relative].set_progress_handler(self._progress, 1000)
+            else:
+                raise ToolError("KEY_NOT_FOUND", "该数据库密钥不存在。", details={"file": relative})
         return self.connections[relative]
 
     def resolve_db(self, kind="", path=""):
@@ -471,26 +993,32 @@ class Backend:
             return matches[0]
         raise ToolError("DATABASE_UNAVAILABLE", "当前副本没有该类型的数据库。")
 
+    @live_query
     def execQuery(self, kind, path=None, sql="", params=None, **_):
         connection = self.connection(self.resolve_db(kind, path or ""))
-        rows = connection.execute(sql, params or []).fetchall()
+        with self._transaction(connection):
+            rows = connection.execute(sql, params or []).fetchall()
         return {"success": True, "rows": [json_row(row) for row in rows]}
 
     def contact_rows(self, usernames=None):
         connection = self.connection("contact/contact.db")
-        rows = [json_row(row) for row in connection.execute("SELECT * FROM contact")]
+        with self._transaction(connection):
+            rows = [json_row(row) for row in connection.execute("SELECT * FROM contact")]
         for row in rows:
             username = row.get("username", "")
             row.setdefault("local_type", 2 if "@chatroom" in username else 3 if username.startswith("gh_") else 1)
         return [r for r in rows if not usernames or r.get("username") in usernames]
 
+    @live_query
     def getContact(self, username, **_):
         rows = self.contact_rows([username])
         return {"success": True, "contact": rows[0] if rows else None}
 
+    @live_query
     def getContactsCompact(self, usernames=None, **_):
         return {"success": True, "contacts": self.contact_rows(usernames)}
 
+    @live_query
     def contact_map(self, usernames, field):
         result = {}
         for row in self.contact_rows(usernames):
@@ -523,7 +1051,7 @@ class Backend:
             if table:
                 yield relative, connection, table
 
-    def shard_messages(self, relative, connection, table, ascending, begin, end):
+    def shard_messages(self, relative, connection, table, ascending, begin, end, limit=None, after=None):
         available = columns(connection, table)
         required = {"local_id", "local_type", "create_time", "message_content", "real_sender_id"}
         if required - available:
@@ -541,11 +1069,18 @@ class Backend:
         if end:
             where.append("m.create_time <= ?")
             params.append(end)
+        if after:
+            comparator = ">" if ascending else "<"
+            where.append(f"(m.create_time, {sequence}, m.local_id, ?) {comparator} (?, ?, ?, ?)")
+            params.extend([str(self.root / relative), *after])
         sql = f"SELECT m.*, n.user_name AS sender_username FROM {quoted(table)} m LEFT JOIN {quoted(mapping)} n ON n.rowid=m.real_sender_id"
         if where:
             sql += " WHERE " + " AND ".join(where)
         sql += f" ORDER BY m.create_time {order}, {sequence} {order}, m.local_id {order}"
+        if limit is not None:
+            sql += f" LIMIT {max(1, int(limit))}"
         for original in connection.execute(sql, params):
+            self._check_limits()
             row = json_row(original)
             raw, compression = original["message_content"], row.get("WCDB_CT_message_content")
             fallback = original["compress_content"] if "compress_content" in available else None
@@ -564,17 +1099,27 @@ class Backend:
             row.update(_db_path=str(self.root / relative), _db_name=Path(relative).name, _table_name=table)
             yield row
 
-    def message_stream(self, session_id, ascending=True, begin=0, end=0):
-        streams = [self.shard_messages(relative, conn, table, ascending, begin, end)
-                   for relative, conn, table in self.message_tables(session_id)]
+    def message_stream(self, session_id, ascending=True, begin=0, end=0, limit=None, after=None):
+        if self.mode == "live":
+            streams = []
+            for relative, conn, table in self.message_tables(session_id):
+                captured_at = time.monotonic()
+                with self._transaction(conn):
+                    streams.append(list(self.shard_messages(relative, conn, table,
+                                                            ascending, begin, end, limit, after)))
+                if time.monotonic() - captured_at > 5:
+                    raise ToolError("LIVE_READ_TIMEOUT", "在线导出捕获超过 5 秒，请缩小范围或使用 snapshot。")
+            streams = [iter(rows) for rows in streams]
+        else:
+            streams = [self.shard_messages(relative, conn, table, ascending, begin, end, limit, after)
+                       for relative, conn, table in self.message_tables(session_id)]
         key = lambda row: (int(row["create_time"]), int(row["sort_seq"]), int(row["local_id"]), row["_db_path"])
         seen = {}
         for row in heapq.merge(*streams, key=key, reverse=not ascending):
+            self._check_limits()
             server = row["server_id"]
             if server != "0":
-                signature = hashlib.sha256(json.dumps(
-                    [row["message_content"], row["sender_username"], row["create_time"], row["local_type"]],
-                    ensure_ascii=False, separators=(",", ":")).encode()).digest()
+                signature = message_signature(row)
                 if server in seen:
                     if seen[server] != signature:
                         raise ToolError("MESSAGE_CONFLICT", "同一消息 ID 在分库中出现冲突。")
@@ -582,18 +1127,87 @@ class Backend:
                 seen[server] = signature
             yield row
 
+    @live_query
     def getMessages(self, sessionId, limit=50, offset=0, **_):
-        rows = list(itertools.islice(self.message_stream(sessionId, False), max(0, offset), max(0, offset) + max(1, limit)))
-        return {"success": True, "messages": rows}
+        automatic_budget = self.mode == "live" and self._deadline is None
+        if automatic_budget:
+            self.begin_request(None, 2000)
+        requested = max(1, int(limit))
+        try:
+            source_limit = max(1, int(offset) + requested) if self.mode == "live" else None
+            try:
+                if self.mode == "live":
+                    state = {"session": sessionId, "size": source_limit, "ascending": False,
+                             "begin": 0, "end": 0, "position": None, "seen": {}}
+                    page = self._live_page(state)
+                    rows = page["rows"][max(0, offset):]
+                else:
+                    rows = list(itertools.islice(self.message_stream(sessionId, False),
+                                                 max(0, offset), max(0, offset) + requested))
+            except Exception as error:
+                if "interrupt" in str(error).casefold() and self._deadline is not None and time.monotonic() >= self._deadline:
+                    raise ToolError("LIVE_READ_TIMEOUT", "在线读取超过时间限制。") from error
+                raise
+            return {"success": True, "messages": rows}
+        finally:
+            if automatic_budget:
+                self.end_request()
 
+    @live_query
     def openMessageCursor(self, sessionId, batchSize=100, ascending=False, beginTimestamp=0, endTimestamp=0, **_):
         self.next_cursor += 1
+        if self.mode == "live":
+            self.cursors[self.next_cursor] = {"session": sessionId, "size": max(1, batchSize),
+                "ascending": bool(ascending), "begin": beginTimestamp, "end": endTimestamp,
+                "revision": self.revision, "position": None, "seen": {}}
+            return {"success": True, "cursor": self.next_cursor, "revision": self.revision}
         self.cursors[self.next_cursor] = [iter(self.message_stream(sessionId, ascending, beginTimestamp, endTimestamp)), max(1, batchSize)]
         return {"success": True, "cursor": self.next_cursor}
 
+    def _live_page(self, state):
+        rows, position = [], state["position"]
+        seen = dict(state["seen"])
+        while len(rows) <= state["size"]:
+            candidates = list(self.message_stream(state["session"], state["ascending"],
+                state["begin"], state["end"], state["size"] + 1, position))
+            if not candidates:
+                break
+            for row in candidates:
+                key = (int(row["create_time"]), int(row["sort_seq"]), int(row["local_id"]), row["_db_path"])
+                position = key
+                server = row["server_id"]
+                if server != "0":
+                    signature = message_signature(row)
+                    if server in seen:
+                        if seen[server] != signature:
+                            raise ToolError("MESSAGE_CONFLICT", "同一消息 ID 在分库中出现冲突。")
+                        continue
+                    seen[server] = signature
+                rows.append(row)
+                if len(rows) > state["size"]:
+                    break
+            if len(rows) > state["size"]:
+                break
+        more = len(rows) > state["size"]
+        rows = rows[:state["size"]]
+        if rows:
+            last = rows[-1]
+            state["position"] = (int(last["create_time"]), int(last["sort_seq"]), int(last["local_id"]), last["_db_path"])
+            for row in rows:
+                if row["server_id"] != "0":
+                    state["seen"][row["server_id"]] = message_signature(row)
+        return {"success": True, "rows": rows, "hasMore": more, "revision": self.revision}
+
+    @live_query
     def fetchMessageBatch(self, cursor, **_):
         if cursor not in self.cursors:
             raise ToolError("CURSOR_CLOSED", "消息分页已经结束，请重新打开聊天。")
+        if self.mode == "live" and isinstance(self.cursors[cursor], dict):
+            state = self.cursors[cursor]
+            if state["revision"] != self.revision:
+                self.cursors.pop(cursor, None)
+                raise ToolError("CURSOR_STALE", "数据库已发生变化，请重新加载消息页。")
+            return self._live_page(state)
         iterator, size = self.cursors[cursor]
         rows = list(itertools.islice(iterator, size))
         sentinel = object()
@@ -607,6 +1221,7 @@ class Backend:
         self.cursors.pop(cursor, None)
         return {"success": True}
 
+    @live_query
     def getSessions(self, **_):
         if self.session_cache is not None:
             return {"success": True, "sessions": self.session_cache}
@@ -623,7 +1238,7 @@ class Backend:
         for username in sorted(candidates):
             if message_table(username).lower() not in known_tables:
                 continue
-            latest = next(self.message_stream(username, False), None)
+            latest = next(self.message_stream(username, False, limit=1), None)
             if latest:
                 result.append({"username": username, "summary": latest["message_content"],
                                "last_timestamp": latest["create_time"], "sort_timestamp": latest["create_time"],
@@ -632,6 +1247,7 @@ class Backend:
         self.session_cache = result
         return {"success": True, "sessions": result}
 
+    @live_query
     def stats(self, session_id, begin=0, end=0):
         cache_key = (session_id, begin, end)
         if cache_key in self.stats_cache:
@@ -711,6 +1327,7 @@ class Backend:
                 data[field].update(stats[field])
         return {"success": True, "data": data}
 
+    @live_query
     def searchMessages(self, keyword, sessionId=None, limit=100, offset=0, beginTimestamp=0, endTimestamp=0, **_):
         session_ids = [sessionId] if sessionId else [s["username"] for s in self.getSessions()["sessions"]]
         def matches():
@@ -722,10 +1339,10 @@ class Backend:
         return {"success": True, "messages": rows}
 
     def dispatch(self, method, payload):
-        simple = {"discover", "prepareKeys", "createSnapshot", "status", "snapshotConfig", "exportRaw", "open", "close", "testConnection",
+        simple = {"discover", "prepareKeys", "getImageKeys", "resolveImageHardlink", "resolveImageHardlinkBatch", "createSnapshot", "status", "snapshotConfig", "connectionConfig", "getConnectionStatus", "setReadMode", "exportRaw", "open", "close", "testConnection",
                   "execQuery", "getContact", "getContactsCompact", "listMessageDbs", "listMediaDbs", "getSessions",
                   "getMessages", "openMessageCursor", "fetchMessageBatch", "closeMessageCursor",
-                  "getSessionMessageTypeStats", "searchMessages"}
+                  "getSessionMessageTypeStats", "searchMessages", "setMonitor", "cancel"}
         if method in simple:
             return getattr(self, method)(**payload)
         if method == "isConnected":
@@ -738,8 +1355,8 @@ class Backend:
             # The Python adapter has no native DLL paths or configurable log
             # switches; accepting these calls would hide a disconnected UI.
             raise ToolError("FEATURE_UNAVAILABLE", "内置后端不需要原生库路径或日志开关。", details={"method": method})
-        if method in {"setMonitor", "cloudStop", "cloudInit", "cloudReport"}:
-            raise ToolError("FEATURE_UNAVAILABLE", "内置后端未实现实时监控或云报告。", details={"method": method})
+        if method in {"cloudStop", "cloudInit", "cloudReport"}:
+            raise ToolError("FEATURE_UNAVAILABLE", "内置后端未实现云报告。", details={"method": method})
         if method == "getLogs":
             return {"success": True, "logs": []}
         maps = {"getDisplayNames": "display", "getAvatarUrls": "avatar", "getContactAliasMap": "alias", "getContactFriendFlags": "friend"}

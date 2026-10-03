@@ -394,6 +394,7 @@ interface ChatConnectionTarget {
   decryptKey: string
   accountDir: string
   identity: string
+  mode?: 'snapshot' | 'live'
 }
 
 export interface ConversationAnalysisScanMessage {
@@ -421,9 +422,11 @@ class ChatService {
     resourcesPath?: string
     appPath?: string
     isPackaged?: boolean
+    mode?: 'snapshot' | 'live'
   }
   private connected = false
   private readonly dbMonitorListeners = new Set<(type: string, json: string) => void>()
+  private readonly databaseStatusListeners = new Set<(status: Record<string, unknown>) => void>()
   private messageCursors: Map<string, { cursor: number; fetched: number; batchSize: number; startTime?: number; endTime?: number; ascending?: boolean; bufferedMessages?: any[] }> = new Map()
   private messageCursorMutex: boolean = false
   private readonly messageBatchDefault = 50
@@ -576,8 +579,13 @@ class ChatService {
     this.voiceTranscriptCache = new LRUCache(1000) // 最多缓存1000条转写记录
   }
 
-  setRuntimeConfig(config: { dbPath?: string; decryptKey?: string; myAccountId?: string; resourcesPath?: string; appPath?: string; isPackaged?: boolean }): void {
+  setRuntimeConfig(config: { dbPath?: string; decryptKey?: string; myAccountId?: string; resourcesPath?: string; appPath?: string; isPackaged?: boolean; mode?: 'snapshot' | 'live' }): void {
     this.runtimeConfig = config
+  }
+
+  setReadMode(mode: 'snapshot' | 'live'): void {
+    if (this.runtimeConfig) this.runtimeConfig.mode = mode
+    else this.runtimeConfig = { mode }
   }
 
   setErrorReferenceOpener(opener: ((query: string) => void | Promise<void>) | null): void {
@@ -695,7 +703,7 @@ class ChatService {
     const identity = crypto.createHash('sha256')
       .update(`${path.resolve(accountDir)}\u0000${decryptKey}`)
       .digest('hex')
-    return { accountId, dbPath, decryptKey, accountDir, identity }
+    return { accountId, dbPath, decryptKey, accountDir, identity, mode: this.runtimeConfig?.mode }
   }
 
   private getCacheAccountScope(): string {
@@ -717,7 +725,7 @@ class ChatService {
         return { success: true }
       }
 
-      const openOk = await wcdbService.open(target.accountDir, target.decryptKey)
+      const openOk = await wcdbService.open(target.accountDir, target.decryptKey, target.mode)
       if (!openOk) {
         const detailedError = this.toCodeOnlyMessage(await wcdbService.getLastInitError())
         await this.maybeOpenInitFailureReference(detailedError)
@@ -752,6 +760,7 @@ class ChatService {
   }
 
   private monitorSetup = false
+  private liveChangeSerial: Promise<void> = Promise.resolve()
 
   addDbMonitorListener(listener: (type: string, json: string) => void): () => void {
     this.dbMonitorListeners.add(listener)
@@ -760,34 +769,88 @@ class ChatService {
     }
   }
 
+  addDatabaseStatusListener(listener: (status: Record<string, unknown>) => void): () => void {
+    this.databaseStatusListeners.add(listener)
+    return () => this.databaseStatusListeners.delete(listener)
+  }
+
   private setupDbMonitor() {
     if (this.monitorSetup) return
     this.monitorSetup = true
 
     // 使用 C++数据服务内部的文件监控 (ReadDirectoryChangesW)
     // 这种方式更高效，且不占用 JS 线程，并能直接监听 session/message 目录变更
-    wcdbService.setMonitor((type, json) => {
-      this.handleSessionStatsMonitorChange(type, json)
-      for (const listener of this.dbMonitorListeners) {
-        try {
-          listener(type, json)
-        } catch (error) {
-          console.error('[ChatService] 数据库监听回调失败:', error)
+    wcdbService.setConnectionStatusListener((status) => {
+      for (const listener of this.databaseStatusListeners) {
+        try { listener(status as Record<string, unknown>) } catch (error) {
+          console.error('[ChatService] 数据库状态回调失败:', error)
         }
       }
-      // Headless workers (including Agent acceptance runs) share ChatService
-      // but do not have a BrowserWindow implementation. Database monitoring is
-      // still useful there; only the renderer broadcast is inapplicable.
       const windows = BrowserWindow && typeof BrowserWindow.getAllWindows === 'function'
         ? BrowserWindow.getAllWindows()
         : []
-      // 广播给所有渲染进程窗口
       windows.forEach((win) => {
-        if (!win.isDestroyed()) {
-          win.webContents.send('wcdb-change', { type, json })
-        }
+        if (!win.isDestroyed()) win.webContents.send('database-status', status)
       })
     })
+    wcdbService.setMonitor((type, json) => {
+      this.liveChangeSerial = this.liveChangeSerial.then(async () => {
+        // Invalidate derived state, including disk caches, before notifying renderers.
+        this.handleSessionStatsMonitorChange(type, json)
+        if (type === 'change' || String(json).toLowerCase().includes('database_commit')) {
+          await this.invalidateLiveChangeCaches()
+        }
+        for (const listener of this.dbMonitorListeners) {
+          try {
+            listener(type, json)
+          } catch (error) {
+            console.error('[ChatService] 数据库监听回调失败:', error)
+          }
+        }
+        // Headless workers share ChatService but do not have BrowserWindow.
+        const windows = BrowserWindow && typeof BrowserWindow.getAllWindows === 'function'
+          ? BrowserWindow.getAllWindows()
+          : []
+        windows.forEach((win) => {
+          if (!win.isDestroyed()) win.webContents.send('wcdb-change', { type, json })
+        })
+      }).catch((error) => {
+        console.error('[ChatService] 数据库变化处理失败:', error)
+      })
+    })
+  }
+
+  private async invalidateLiveChangeCaches(): Promise<void> {
+    const accountScope = this.getCacheAccountScope()
+    this.accountCacheEpoch += 1
+    this.contactsLoadInFlight = null
+    this.contactsMemoryCache.clear()
+    this.contactCacheService.clearScope(accountScope)
+    await this.messageCacheService.clearScope(accountScope)
+    this.mediaDbsCache = null
+    this.mediaDbsCacheTime = 0
+    this.mediaDbsCacheScope = ''
+    this.mediaDbSchemaCache.clear()
+    this.sessionTablesCache.clear()
+    this.messageTableColumnsCache.clear()
+    this.messageName2IdTableCache.clear()
+    this.messageSenderIdCache.clear()
+    this.messageDbCountSnapshotCache = null
+    this.sessionMessageCountCache.clear()
+    this.sessionMessageCountHintCache.clear()
+    this.sessionMessageCountBatchCache = null
+    this.sessionDetailFastCache.clear()
+    this.sessionDetailExtraCache.clear()
+    this.sessionStatusCache.clear()
+    this.sessionStatsMemoryCache.clear()
+    this.sessionStatsPendingBasic.clear()
+    this.sessionStatsPendingFull.clear()
+    this.allGroupSessionIdsCache = null
+    this.groupMyMessageCountMemoryCache.clear()
+    for (const state of this.messageCursors.values()) {
+      void wcdbService.closeMessageCursor(state.cursor).catch(() => {})
+    }
+    this.messageCursors.clear()
   }
 
   /**

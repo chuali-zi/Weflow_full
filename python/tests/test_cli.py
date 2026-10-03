@@ -23,6 +23,82 @@ class CliTests(unittest.TestCase):
     def tearDown(self):
         self.temp.cleanup()
 
+    def test_live_decrypt_rejects_snapshot_only_options(self):
+        code, result, _, _ = self.invoke(
+            ['--user-data', str(self.profile), 'decrypt', '--mode', 'live', '--wait-exit', '0'],
+            FakeWindows())
+        self.assertEqual(code, cli.EXIT_CODES['CLI_USAGE'])
+        self.assertEqual(result['code'], 'CLI_USAGE')
+
+    def live_backend(self, root, saved='snapshot'):
+        backend = Mock()
+        backend.state.mode.return_value = saved
+        backend.state.set_mode = Mock()
+        backend.state.settings.return_value = {'data_dir': str(root)}
+        backend.state.root = self.profile / 'backend'
+        backend.owner = 'wxid_me'
+        backend.testConnection.return_value = {'success': True, 'accountId': 'wxid_me'}
+        backend.open.return_value = True
+        backend.getSessions.return_value = {'success': True, 'sessions': []}
+        backend.getMessages.return_value = {'success': True, 'messages': []}
+        backend.getConnectionStatus.return_value = {
+            'success': True, 'mode': 'live', 'connectionId': 'opaque', 'revision': 2}
+        backend.close.return_value = {'success': True}
+        return backend
+
+    def test_live_verify_and_query_override_do_not_save_mode(self):
+        root = self.home / 'db_storage'
+        backend = self.live_backend(root)
+        args = cli.parser().parse_args(['--data-dir', str(root), 'verify', '--mode', 'live'])
+        result = cli.execute(args, backend, self.profile)
+        self.assertEqual(result['mode'], 'live')
+        self.assertEqual(result['accountId'], 'wxid_me')
+        self.assertEqual(result['freshness']['connectionId'], 'opaque')
+        self.assertIn('queriedAt', result['freshness'])
+        self.assertEqual(result['freshness']['consistency'], 'per_database')
+        backend.state.set_mode.assert_not_called()
+
+        args = cli.parser().parse_args(['--data-dir', str(root), 'sessions', '--mode', 'live'])
+        cli.execute(args, backend, self.profile)
+        backend.open.assert_called_with(str(root), mode='live')
+        backend.state.set_mode.assert_not_called()
+
+    def test_live_prepare_saves_mode_only_after_configuration(self):
+        root = self.home / 'db_storage'
+        backend = self.live_backend(root)
+        backend.prepareKeys.return_value = {
+            'success': True, 'dataDir': str(root), 'verifiedDatabases': 3,
+            'unavailableDatabases': []}
+        args = cli.parser().parse_args(['--data-dir', str(root), 'prepare', '--mode', 'live'])
+        with patch.object(cli, 'configure_gui', return_value={'success': True}):
+            result = cli.execute(args, backend, self.profile)
+        self.assertTrue(result['configured'])
+        backend.state.set_mode.assert_called_once_with(root.resolve(), 'live')
+
+    def test_decrypt_forces_snapshot_without_changing_saved_live_mode(self):
+        root = self.home / 'db_storage'
+        backend = self.live_backend(root, saved='live')
+        backend.testConnection.return_value = {'success': True}
+        args = cli.parser().parse_args(['--data-dir', str(root), 'decrypt'])
+        with patch.object(cli, 'wait_for_exit') as wait, \
+             patch.object(cli, 'verify_snapshot', return_value={'success': True, 'mode': 'snapshot'}):
+            result = cli.execute(args, backend, self.profile)
+        self.assertEqual(result['mode'], 'snapshot')
+        wait.assert_called_once_with(backend, 0)
+        backend.testConnection.assert_called_once_with(str(root), mode='snapshot')
+        backend.state.set_mode.assert_not_called()
+
+    def test_snapshot_verification_explicitly_bypasses_saved_live_mode(self):
+        root = self.home / 'db_storage'
+        backend = self.live_backend(root, saved='live')
+        backend.read_active.return_value = {
+            'files': [], 'directory': str(self.home), 'accountId': 'wxid_me',
+            'capturedAt': '2026-10-02T12:00:00+00:00'}
+        backend.source_metadata_changed.return_value = False
+        with patch.object(cli, 'inventory', return_value=[]):
+            cli.verify_snapshot(backend, root)
+        backend.open.assert_called_once_with(str(root), mode='snapshot')
+
     def invoke(self, argv, windows):
         backends = []
 

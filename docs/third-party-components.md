@@ -1,5 +1,9 @@
 # 第三方可插拔组件接口说明
 
+本文保留上游的外部组件协议，下文“全部由用户配置”“留空无替代”等描述属于上游组件路径。当前分支在密钥 / WCDB / 原始导出路径留空时已有内置 wxtext 后端，详见 [本地接入说明](integrated-backend.md)。新的内置在线方案见 [在线架构](live-architecture.md)；显式配置外部组件时仍沿用本文协议。
+
+内置在线引擎使用 sqlcipher3 0.6.2 的 Windows wheel，包含 SQLCipher / SQLite；冻结后端显式收集扩展与驱动发行元数据，不需要用户配置 DLL。驱动发行包原许可保存于 [sqlcipher3 许可](licenses/sqlcipher3.txt)，随 PyInstaller 元数据保留。感谢 sqlcipher3、SQLCipher 和 SQLite 提供在线数据库读取能力。项目整体仍沿用仓库 LICENSE，第三方组件适用其自身许可。
+
 WeFlow 不再内置任何用于读取/解密本地数据的原生组件。以下四类能力全部由用户在
 「设置 -> 数据库 -> 第三方组件路径」中自行配置一个可执行文件/动态库/插件路径，
 应用只按下述协议与其交互，不对其来源、签名或实现方式做任何校验。

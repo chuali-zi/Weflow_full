@@ -1,8 +1,25 @@
 # WeFlow 本地解密接入说明
 
+当前正式实现支持 **live 在线读取** 和 **snapshot 离线副本**。live 在微信运行时只读查询加密 DB / WAL，并通过原 WeFlow 界面自动刷新；snapshot 保存固定的明文副本。在线细节见 [在线架构](live-architecture.md)、[接入规格](live-spec.md) 和 [完整方案](live-integration-plan.md)，实测边界见 [热加载验证](live-validation.md)。下文退出要求只适用于离线副本准备。
+
 本分支基于 WeFlow 5.0.0（上游提交 `837697b`）。保留原 Welcome、设置、聊天和导出界面及用户流程，通过 Electron 现有密钥和 WCDB 接口接入仓库内的 wxtext 解密工具与查询后端。
 
 ## 用户操作流程
+
+原 Welcome / 数据库设置中可选择“在线读取 / 离线副本”，继续使用原目录、获取密钥和连接按钮。已有配置未保存模式时默认 snapshot。在线模式流程：
+
+```text
+原目录 / 获取密钥入口
+  → 逐库认证并缓存密钥
+  → SQLCipher 只读连接核心库，按需连接可选库
+  → 原界面查看聊天
+  → 每秒检测同连接 data_version
+  → 提交后失效派生缓存，刷新列表和当前消息页
+```
+
+live 不生成整库明文副本。分页使用有界 keyset 查询，各次 RPC 返回前释放读事务；变化使旧游标失效。同秒新增、已显示消息修改 / 删除、历史补入均触发刷新，浏览历史时恢复可见消息锚点。导出用独立后端按分库捕获，再交给原格式转换器。
+
+snapshot 流程：
 
 ```text
 WeFlow 原欢迎/数据库设置界面
@@ -27,15 +44,16 @@ WeFlow 原欢迎/数据库设置界面
 - **密钥工具**：原设置中显式配置了第三方密钥获取 `.exe` 时，WeFlow 继续调用该程序；未配置时调用内置 wxtext。若配置路径无效，向用户返回配置错误，不静默改用另一实现。
 - **WCDB 查询**：原设置中显式配置了第三方 WCDB DLL 时，继续走原生 WCDB Worker；未配置时由本地 Python 查询后端实现 WeFlow Worker 的消息协议。
 - **原始导出**：已配置 WeLive 导出 `.exe` 时，沿用原配置；未配置且内置原始导出可用时输出 JSONL，并由 WeFlow 原有格式转换器生成其支持的格式。
-- **离线核心范围**：联系人、会话、完整消息分库、消息分页和搜索、发送者识别、Zstandard 长文本及基础统计。
-- **尚未完整接入或验证**：图片 AES 密钥自动获取、完整群成员名单、朋友圈专用查询、部分高级报表和媒体附件恢复。实时监听与数据库写操作不属于离线副本实现范围。
+- **内置核心范围**：联系人、会话、完整消息分库、消息分页和搜索、发送者识别、Zstandard 长文本及基础统计；live 增加提交检测和界面刷新。
+- **图片**：内置后端获取并验证账号 V2 图片 AES / XOR 密钥，DPAPI 加密缓存；通过 hardlink.db 定位本机附件，GUI 内置 JS 解密，无需另配媒体插件。在线模式对可见、尚未成功解析的图片每 3 秒重试，覆盖附件晚于消息落盘的情况。其他格式和未下载的云端原图不保证可用。
+- **尚未完整接入或验证**：完整群成员名单、朋友圈专用查询、部分高级报表，以及视频 / 语音等其他媒体恢复。不支持向微信源数据库写入。
 
 Windows x64 与 wxtext 支持的微信 4.x SQLCipher 4 / 4096 字节页格式为实现目标。微信 4.1.13.65 已完成目录选择、密钥认证、整库解密、CLI 查询及真实 WeFlow GUI 聊天查看与导出；冻结资源目录（`win-unpacked`）的 CLI / GUI 验证已通过，NSIS 安装程序已生成。未执行完整交互安装验收，其他微信版本兼容性也尚未确认。
 
 ## 实现位置
 
 - `python/wxtext/`：密钥扫描、密钥校验、DPAPI 缓存、数据库复制、WAL 处理与认证解密。
-- `python/weflow_backend/`：账号目录匹配、快照管理、只读 SQLite、WeFlow 会话/消息查询及内置原始导出。
+- `python/weflow_backend/`：账号目录匹配、快照管理、只读 SQLite / SQLCipher、WeFlow 会话/消息查询、变化检测及内置原始导出。
 - `electron/services/keyProviderService.ts`：优先使用用户配置的外部密钥程序；未配置时调用内置后端。
 - `electron/services/wcdbService.ts`：按现有 WCDB 配置选择原 Worker 或内置查询 Worker。
 - `electron/localWcdbWorker.ts`：内置后端的原 WCDB Worker 消息协议适配。
@@ -46,9 +64,11 @@ Windows x64 与 wxtext 支持的微信 4.x SQLCipher 4 / 4096 字节页格式为
 
 ## 验证说明
 
+当前后端 **30 项回归测试**通过。源码 Electron 的在线热加载测试覆盖 20 条同秒新增、修改、删除、历史补入、滚动锚点及独立导出；原 snapshot 的四种导出格式回归通过。真实微信运行时在线 verify 返回 411 个实际聊天会话，约 2.2 秒。包内资源和未执行的验收分别见 [热加载验证](live-validation.md)。下列大规模导出与完整性结果是此前 snapshot 验证记录。
+
 真实微信 **4.1.13.65** 账号验证结果：微信配置指向的 D 盘目录中 **21 / 21** 个数据库首页通过 HMAC 认证，旧 C 盘目录中 **0 / 18** 个通过。独立打包后端按微信配置自动选中 D 盘，缓存的 **21** 个逐库密钥均通过对应首页认证；随后 **21 个数据库均已整库解密**。CLI 查询到 **411 个会话**，一条私聊含 **8,173** 条原始消息（发送 **5,071** 条、接收 **3,102** 条）。普通数据库完整性检查通过；依赖微信专用 `MMFtsTokenizer` 的有限 FTS 检查通过 `limitedChecks` 明确标记，不声称已完成。
 
-**17 项 Python 回归测试**已通过，覆盖密钥认证、分库、分页、发送者、长文本、搜索、只读查询、导出及失败恢复。源码和独立 profile 的 CLI doctor/accounts/status/keys/verify/configure/sessions/messages/search/export 均已通过，冻结后端的 verify 也已通过。源码及独立打包 Electron 使用合成账号通过原界面、连接、分页、搜索和 TXT、HTML、JSON、WeClone CSV 导出。
+此前 snapshot 回归覆盖密钥认证、分库、分页、发送者、长文本、搜索、只读查询、导出及失败恢复。源码和独立 profile 的 CLI doctor/accounts/status/keys/verify/configure/sessions/messages/search/export 均已通过，冻结后端的 verify 也已通过。源码及独立打包 Electron 使用合成账号通过原界面、连接、分页、搜索和 TXT、HTML、JSON、WeClone CSV 导出。
 
 源码 CLI `prepare` 已将已验证配置写入用户默认 `%APPDATA%\WeFlow-full` profile，包含 21 个数据库和 411 个会话。真实 profile 下原版 WeFlow GUI 无需手动连接或补写配置，启动后自动进入 `#/home`。界面列出 700 个上游会话项（包括联系人虚拟会话）；后端实际有消息的会话为 411 个。真实 GUI 已读取 50 条消息、搜索返回 20 条，并通过 TXT、HTML、JSON 与 WeClone CSV 导出；JSON 和 WeClone CSV 各有 **8,173** 条消息。通用 CSV 格式尚未验证。
 

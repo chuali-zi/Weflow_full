@@ -1,19 +1,21 @@
 # Agent 首次启动与 CLI 排错
 
-本指南给 Agent 或自动化脚本一个可恢复的启动顺序。命令行会准备离线副本并复用 WeFlow 原有 GUI；它不会替用户同意协议、解除应用锁或强制结束微信。
+本指南支持在线读取和离线副本。在线读取及 GUI 热加载的设计见 [新架构](live-architecture.md)、[接入规格](live-spec.md) 和 [完整方案](live-integration-plan.md)。
+
+推荐首次使用 `prepare --mode live --launch`：保持微信登录，在缓存完整后无需退出微信即可查询并打开原 GUI。需要固定副本时使用 `--mode snapshot`；下文的退出、decrypt 流程只用于 snapshot。命令不会替用户同意协议、解除应用锁或强制结束微信。
 
 ## 最短启动
 
 在源码仓库根目录或安装目录的 PowerShell 中运行（命令提示符中可去掉 `.\`）：
 
 ```powershell
-.\weflow.cmd prepare --launch
+.\weflow.cmd prepare --mode live --launch
 ```
 
 这是单账号目录时最简单的方式。若电脑上有多个微信数据目录，应先运行 `weflow.cmd accounts`，再明确指定正确的 `db_storage`，不要根据账号名猜旧 C 盘或新 D 盘目录：
 
 ```powershell
-.\weflow.cmd prepare --data-dir "D:\wechat\xwechat_files\wxid_example\db_storage" --launch
+.\weflow.cmd prepare --mode live --data-dir "D:\wechat\xwechat_files\wxid_example\db_storage" --launch
 ```
 
 源码版入口会准备所需环境；安装版使用包内冻结后端，不要求另外安装 Node.js 或 Python。命令成功后才会配置并打开原版 WeFlow。
@@ -31,19 +33,21 @@ Agent 可先按下面顺序诊断。若密钥缓存完整且通过认证，`keys
 
 若 `keys` 返回 `KEY_NOT_FOUND`，查看 JSON 的 `details.missing_databases`、`verified_databases` 和 `unavailable_databases`，确认哪些必需数据库仍缺密钥、已有多少密钥通过认证。所选目录可通过 `status --data-dir` 确认，`directorySource` 表示目录选择依据。请用户保持微信登录、打开目标聊天并浏览一段历史记录，再重试 `keys`；必要时加 `--refresh` 重新扫描。这有助于加载数据库，不保证每个版本都能取得全部密钥。不要让用户提供或把密钥打印到日志。副本错误 `SNAPSHOT_REQUIRED` 的 `details.missing` / `file` 则表示缺少所需副本文件，应运行 `decrypt` 或 `prepare` 重新准备。
 
-密钥齐全后，提醒用户从系统托盘**正常退出微信**，再继续准备和校验快照：
+在线模式密钥齐全后，保持微信运行，执行 `verify --mode live` 或 `prepare --mode live --launch`。若返回 LIVE_ENGINE_UNAVAILABLE，先重新准备源码依赖，或使用包含 SQLCipher 的新包；不要改用旧快照掩盖错误。
+
+仅在选择 snapshot 时，提醒用户从系统托盘**正常退出微信**，再继续准备和校验快照：
 
 ```powershell
 .\weflow.cmd decrypt --data-dir "D:\wechat\xwechat_files\wxid_example\db_storage"
-.\weflow.cmd verify --data-dir "D:\wechat\xwechat_files\wxid_example\db_storage"
-.\weflow.cmd configure --data-dir "D:\wechat\xwechat_files\wxid_example\db_storage"
-.\weflow.cmd launch --data-dir "D:\wechat\xwechat_files\wxid_example\db_storage"
+.\weflow.cmd verify --mode snapshot --data-dir "D:\wechat\xwechat_files\wxid_example\db_storage"
+.\weflow.cmd configure --mode snapshot --data-dir "D:\wechat\xwechat_files\wxid_example\db_storage"
+.\weflow.cmd launch --mode snapshot --data-dir "D:\wechat\xwechat_files\wxid_example\db_storage"
 ```
 
-一般情况下直接用 `prepare --launch` 即可完成这些步骤。微信运行时，`prepare` / `decrypt` 会返回 `NEED_EXIT`（退出码 `10`），已取得的密钥会保留。可以选择等待一段时间：
+快照流程可直接用 `prepare --mode snapshot --launch` 完成这些步骤。微信运行时，snapshot prepare / decrypt 会返回 `NEED_EXIT`（退出码 `10`），已取得的密钥会保留。可以选择等待一段时间：
 
 ```powershell
-.\weflow.cmd prepare --data-dir "D:\wechat\xwechat_files\wxid_example\db_storage" --wait-exit 180 --launch
+.\weflow.cmd prepare --mode snapshot --data-dir "D:\wechat\xwechat_files\wxid_example\db_storage" --wait-exit 180 --launch
 ```
 
 `--wait-exit` 只等待微信自行退出，到时限仍运行就返回；工具绝不会自动 kill 微信进程。请关闭微信后重跑命令。
@@ -61,7 +65,7 @@ Agent 可先按下面顺序诊断。若密钥缓存完整且通过认证，`keys
 | `PROFILE_LOCKED`（16） | 改用独立的 `--user-data DIR`，或在原 WeFlow GUI 设置中关闭应用锁。只在 GUI 中解锁不会让 headless CLI 继承解锁状态。 |
 | `GUI_NOT_BUILT`（17） | 源码版运行 `powershell -NoProfile -ExecutionPolicy Bypass -File scripts\launch.ps1 -BuildOnly` 构建 GUI，或通过 `--app` 指定现有 `WeFlow.exe`。 |
 
-若状态显示源数据库变化（`sourceChanged`），请先正常退出微信，再运行 `decrypt` 或 `prepare` 更新副本。工具会保留旧的有效快照，成功后再切换到新副本；不需要删除微信数据库，也不要手动删除旧快照来排错。
+snapshot 状态显示源数据库变化（`sourceChanged`）时，正常退出微信后运行 `decrypt` 或 `prepare --mode snapshot` 更新副本。工具会保留旧的有效快照，成功后再切换；不需要删除微信数据库或旧快照。live 会自动检测提交并更新界面；若状态变为 needs_key，保持登录并通过原密钥入口补齐后重连。忙碌可稍后重试，超时缩小查询 / 导出范围；详细退出码 18–23 见 [CLI](cli.md)。
 
 ## Agent 如何读取结果
 
@@ -78,6 +82,6 @@ Agent 可先按下面顺序诊断。若密钥缓存完整且通过认证，`keys
 .\weflow.cmd export --session "wxid_example" --output "D:\wechat\exports"
 ```
 
-现有 WeFlow GUI 仍提供 TXT、HTML、ChatLab JSON 和 WeClone CSV 导出。`verify` 若把依赖微信专用 `MMFtsTokenizer` 的 FTS 项列入 `limitedChecks`，表示该项检查受缺少微信 tokenizer 的环境限制；应结合普通 SQLite 完整性和可用查询结果判断，不要将其描述为所有 FTS 检查均已通过。媒体恢复及全部高级统计能力不属于这里的保证范围。
+现有 WeFlow GUI 仍提供 TXT、HTML、ChatLab JSON 和 WeClone CSV 导出。live 导出按分库固定事务捕获，结果声明 per_database 一致性；超过每库 5 秒期限时缩小范围或选择 snapshot。live verify 只验证核心连接及基础查询，不宣称全库完整检查。snapshot verify 的 `limitedChecks` 标明微信专用 `MMFtsTokenizer` 等限制。媒体恢复及全部高级统计能力不属于这里的保证范围。
 
 快照是本机的明文 SQLite 副本，密钥缓存受 Windows DPAPI 保护。源微信数据库不会被解密或修改；请不要删除源数据库，也不要向用户或日志输出密钥。

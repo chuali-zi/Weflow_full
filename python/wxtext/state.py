@@ -76,14 +76,50 @@ class StateStore:
                 raise ValueError
             if value.get("self_id") is not None and not isinstance(value["self_id"], str):
                 raise ValueError
+            modes = value.get("database_modes", {})
+            if not isinstance(modes, dict) or any(mode not in {"snapshot", "live"}
+                                                  for mode in modes.values()):
+                raise ValueError
             return value
         except (ValueError, UnicodeError):
             raise ToolError("CACHE_INVALID", "本地设置文件格式错误。", "重新 prepare --data-dir 指定账号目录。") from None
 
     def select(self, data_dir: Path, self_id: str | None, directory_source: str | None = None):
-        settings = {"data_dir": str(data_dir.resolve()), "self_id": self_id}
+        # Keep fields introduced by newer clients (including database_modes).
+        settings = self.settings() if (self.root / "settings.json").exists() else {}
+        settings["data_dir"] = str(data_dir.resolve())
+        settings["self_id"] = self_id
         if directory_source:
             settings["directory_source"] = directory_source
+        atomic_write(self.root / "settings.json", json.dumps(
+            settings, ensure_ascii=False).encode("utf-8"))
+
+    @staticmethod
+    def _mode_key(data_dir: Path) -> str:
+        return os.path.normcase(str(Path(data_dir).expanduser().resolve()))
+
+    def mode(self, root: Path, explicit=None) -> str:
+        """Resolve one-shot mode, saved mode, or the backwards-compatible default."""
+        if explicit is not None:
+            if explicit not in {"snapshot", "live"}:
+                raise ToolError("INVALID_MODE", "读取模式必须是 snapshot 或 live。")
+            return explicit
+        settings = self.settings()
+        mode = (settings.get("database_modes") or {}).get(self._mode_key(root), "snapshot")
+        if mode not in {"snapshot", "live"}:
+            raise ToolError("INVALID_MODE", "已保存的读取模式无效，请重新选择读取模式。")
+        return mode
+
+    def set_mode(self, root: Path, mode: str):
+        if mode not in {"snapshot", "live"}:
+            raise ToolError("INVALID_MODE", "读取模式必须是 snapshot 或 live。")
+        settings = self.settings() if (self.root / "settings.json").exists() else {}
+        modes = dict(settings.get("database_modes") or {})
+        root = Path(root).expanduser().resolve()
+        modes[self._mode_key(root)] = mode
+        settings.setdefault("data_dir", str(root))
+        settings.setdefault("self_id", None)
+        settings["database_modes"] = modes
         atomic_write(self.root / "settings.json", json.dumps(
             settings, ensure_ascii=False).encode("utf-8"))
 

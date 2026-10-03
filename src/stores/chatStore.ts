@@ -54,6 +54,7 @@ export interface ChatState {
   isConnected: boolean
   isConnecting: boolean
   connectionError: string | null
+  databaseStatus: { mode?: 'snapshot' | 'live'; state?: string; connectionId?: string; revision?: number; [key: string]: unknown } | null
 
   // 会话列表
   sessions: ChatSession[]
@@ -78,6 +79,7 @@ export interface ChatState {
   setConnected: (connected: boolean) => void
   setConnecting: (connecting: boolean) => void
   setConnectionError: (error: string | null) => void
+  setDatabaseStatus: (status: ChatState['databaseStatus']) => void
   setSessions: (sessions: ChatSession[]) => void
   setFilteredSessions: (sessions: ChatSession[]) => void
   setCurrentSession: (sessionId: string | null, options?: { preserveMessages?: boolean }) => void
@@ -98,6 +100,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
   isConnected: false,
   isConnecting: false,
   connectionError: null,
+  databaseStatus: null,
   sessions: [],
   filteredSessions: [],
   currentSessionId: null,
@@ -113,6 +116,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
   setConnected: (connected) => set({ isConnected: connected }),
   setConnecting: (connecting) => set({ isConnecting: connecting }),
   setConnectionError: (error) => set({ connectionError: error }),
+  setDatabaseStatus: (status) => set({ databaseStatus: status }),
 
   setSessions: (sessions) => set({ sessions, filteredSessions: sessions }),
   setFilteredSessions: (sessions) => set({ filteredSessions: sessions }),
@@ -190,6 +194,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
       isConnected: false,
       isConnecting: false,
       connectionError: null,
+      databaseStatus: null,
       sessions: [],
       filteredSessions: [],
       currentSessionId: null,
