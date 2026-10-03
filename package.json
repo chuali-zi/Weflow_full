@@ -2,6 +2,7 @@
   "name": "weflow",
   "version": "5.0.0",
   "description": "WeFlow",
+  "license": "CC-BY-NC-SA-4.0",
   "main": "dist-electron/main.js",
   "author": {
     "name": "cc",

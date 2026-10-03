@@ -80,10 +80,24 @@ npm run package:win
 
 安装包内含独立后端。上游作者信息及许可保留于 [LICENSE](LICENSE)（CC BY-NC-SA 4.0），原始上游说明见 [README.upstream.md](README.upstream.md)。接入范围和技术说明见 [docs/integrated-backend.md](docs/integrated-backend.md)。
 
-## 来源与许可
+## 来源与致谢
 
-- 主界面、Electron 应用和导出格式：WeFlow，原作者 **cc / hicccc77**，本次基于上游提交 `837697b`。
+- 主界面、Electron 应用和导出格式来自 [WeFlow](https://github.com/hicccc77/WeFlow)，原作者 **cc / hicccc77**，本分支基于上游提交 [`837697b`](https://github.com/hicccc77/WeFlow/commit/837697b)。
 - 数据库密钥扫描、认证解密、WAL、快照及 DPAPI：本项目原有 `abstract_information/wxtext` 工具，现随仓库放在 `python/wxtext`。
-- 本分支改动：将本地密钥获取、解密与查询能力接入 WeFlow 原有页面及数据库接口，并提供启动和后端打包脚本。
+- 本分支由 [chuali-zi](https://github.com/chuali-zi) 维护：将本地密钥获取、解密与查询能力接入 WeFlow 原有页面及数据库接口，增加 CLI、首次启动、错误恢复和后端打包支持。
 
-保留上游作者信息和 [LICENSE](LICENSE)（CC BY-NC-SA 4.0）。上游说明原文保存在 [README.upstream.md](README.upstream.md)；其功能说明与下载链接对应上游版本。
+感谢 **cc / hicccc77** 和 [WeFlow 的所有贡献者](https://github.com/hicccc77/WeFlow/graphs/contributors) 提供完整的聊天界面、查询与导出功能，让本分支能够在已有成果上接入本地解密和 Agent 使用流程。也感谢 SQLCipher、SQLite、Microsoft Windows API、Zstandard 等项目的公开文档，以及 wxtext 研发时使用的公开参考资料，具体链接见 [研发依据](docs/wxtext-architecture.md#研发依据)。
+
+本仓库是独立维护的衍生版本。上游说明原文保存在 [README.upstream.md](README.upstream.md)，其中的功能说明与下载链接对应上游版本。
+
+## 许可证
+
+本衍生版本及本分支对 WeFlow 的修改采用 **Creative Commons Attribution-NonCommercial-ShareAlike 4.0 International（CC BY-NC-SA 4.0，署名—非商业性使用—相同方式共享）**，完整条款见 [LICENSE](LICENSE) 和 [官方许可说明](https://creativecommons.org/licenses/by-nc-sa/4.0/deed.zh-hans)。
+
+在遵守条款的前提下，可以复制、修改和分享本项目：
+
+- 保留原作者、项目来源、许可证及免责声明，并说明所做的修改。
+- 仅用于非商业目的；商业使用需要另外取得相关权利人的授权。
+- 分享修改后的衍生版本时，使用相同或许可允许的兼容条款。
+
+本分支沿用上游许可，不增加额外限制。上游的非商业与相同方式共享要求仍然适用，因此不能将整个衍生版本改为 MIT、Apache-2.0 或 CC0。第三方依赖与另有许可声明的组件继续遵循各自的许可证。
