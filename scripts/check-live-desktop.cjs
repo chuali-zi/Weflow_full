@@ -72,6 +72,18 @@ if (!process.env.WEFLOW_LIVE_SMOKE_CONFIG) {
         }
         throw new Error(`Timed out: ${label}`);
       };
+      const scrollToBottom = async () => {
+        // Virtuoso updates its estimated height while new rows mount. Settle
+        // that layout before asserting changes to the last visible message.
+        await evaluate(`(async () => {
+          const list = document.querySelector('.message-list');
+          for (let i = 0; i < 5; i++) {
+            list.scrollTop = list.scrollHeight;
+            await new Promise(resolve => setTimeout(resolve, 100));
+          }
+        })()`);
+        await waitFor(`(() => { const list = document.querySelector('.message-list'); return list.scrollHeight - list.scrollTop - list.clientHeight < 12; })()`, 'bottom layout settled');
+      };
       try {
         await evaluate(`(async () => {
           await window.electronAPI.config.set('agreementAccepted', true);
@@ -86,8 +98,7 @@ if (!process.env.WEFLOW_LIVE_SMOKE_CONFIG) {
         await waitFor(`Boolean([...document.querySelectorAll('.session-item')].find(el => el.textContent.includes('老朋友')))`, 'chat list');
         await evaluate(`[...document.querySelectorAll('.session-item')].find(el => el.textContent.includes('老朋友')).click()`);
         await waitFor(`document.querySelectorAll('.message-bubble').length > 0`, 'initial messages');
-        await evaluate(`document.querySelector('.message-list').scrollTop = document.querySelector('.message-list').scrollHeight`);
-        await new Promise(resolve => setTimeout(resolve, 250));
+        await scrollToBottom();
         const status = await evaluate(`window.electronAPI.wcdb.getConnectionStatus()`);
         assert.equal(status.mode, 'live');
         assert.equal(status.complete, true);
@@ -95,8 +106,7 @@ if (!process.env.WEFLOW_LIVE_SMOKE_CONFIG) {
         let historyAnchor;
         for (const action of ['append', 'edit', 'delete', 'history']) {
           if (action !== 'history') {
-            await evaluate(`document.querySelector('.message-list').scrollTop = document.querySelector('.message-list').scrollHeight`);
-            await new Promise(resolve => setTimeout(resolve, 250));
+            await scrollToBottom();
           }
           if (action === 'history') {
             await evaluate(`document.querySelector('.message-list').scrollTop = 0`);
@@ -149,8 +159,7 @@ if (!process.env.WEFLOW_LIVE_SMOKE_CONFIG) {
         assert.equal(exported.success, true, JSON.stringify(exported));
         const data = JSON.parse(fs.readFileSync(path.join(config.outputDir, 'live.json'), 'utf8').replace(/^\uFEFF/, ''));
         assert.equal(data.messages.length, 25);
-        await evaluate(`document.querySelector('.message-list').scrollTop = document.querySelector('.message-list').scrollHeight`);
-        await new Promise(resolve => setTimeout(resolve, 250));
+        await scrollToBottom();
         runPython(['python/tests/create_live_smoke_fixture.py', 'image-message', path.join(config.home, 'fixture.json')]);
         await waitFor(`[...document.querySelectorAll('.message-wrapper')].some(el => el.dataset.messageKey?.includes('3000'))`, 'live image message');
         await new Promise(resolve => setTimeout(resolve, 1200));

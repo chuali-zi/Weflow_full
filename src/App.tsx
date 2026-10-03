@@ -81,6 +81,7 @@ function App() {
 
   const {
     setDbConnected,
+    setDbInitializing,
     updateInfo,
     setUpdateInfo,
     isDownloading,
@@ -461,6 +462,9 @@ function App() {
   useEffect(() => {
     if (isAgreementWindow || isOnboardingWindow) return
 
+    let cancelled = false
+    setDbInitializing(true)
+
     const autoConnect = async () => {
       try {
         const dbPath = await configService.getDbPath()
@@ -481,6 +485,7 @@ function App() {
           }
 
           const result = await window.electronAPI.chat.connect()
+          if (cancelled) return
 
           if (result.success) {
 
@@ -507,11 +512,14 @@ function App() {
       } catch (e) {
         console.error('自动连接出错:', e)
         // 捕获异常但不清除配置，防止循环重新引导
+      } finally {
+        if (!cancelled) setDbInitializing(false)
       }
     }
 
     autoConnect()
-  }, [isAgreementWindow, isOnboardingWindow, navigate, setDbConnected])
+    return () => { cancelled = true }
+  }, [isAgreementWindow, isOnboardingWindow, navigate, setDbConnected, setDbInitializing])
 
   // 检查应用锁
   useEffect(() => {

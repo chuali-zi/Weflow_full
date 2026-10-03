@@ -12,15 +12,20 @@ function RouteGuard({ children }: RouteGuardProps) {
   const navigate = useNavigate()
   const location = useLocation()
   const isDbConnected = useAppStore(state => state.isDbConnected)
+  const isDbInitializing = useAppStore(state => state.isDbInitializing)
+  const isPublicRoute = PUBLIC_ROUTES.includes(location.pathname)
 
   useEffect(() => {
-    const isPublicRoute = PUBLIC_ROUTES.includes(location.pathname)
-
-    // 未连接数据库且不在公开页面，跳转到欢迎页
-    if (!isDbConnected && !isPublicRoute) {
+    // Startup connection is asynchronous; preserve the requested route until
+    // its result is known instead of treating the initial false as a failure.
+    if (!isDbInitializing && !isDbConnected && !isPublicRoute) {
       navigate('/', { replace: true })
     }
-  }, [isDbConnected, location.pathname, navigate])
+  }, [isDbInitializing, isDbConnected, isPublicRoute, navigate])
+
+  if (isDbInitializing && !isDbConnected && !isPublicRoute) {
+    return <div className="route-loading" role="status" aria-live="polite"><span /><small>正在连接聊天记录…</small></div>
+  }
 
   return <>{children}</>
 }

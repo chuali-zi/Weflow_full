@@ -21,6 +21,7 @@
     "test:backend": "node scripts/test-backend.cjs",
     "check:desktop": "node scripts/check-desktop.cjs",
     "check:live": "node scripts/check-live-desktop.cjs",
+    "check:startup": "node scripts/check-chat-startup.cjs",
     "postinstall": "patch-package && electron-builder install-app-deps && node scripts/ensure-electron.cjs && node scripts/prepare-electron-runtime.cjs",
     "rebuild": "electron-rebuild",
     "dev": "node scripts/prepare-electron-runtime.cjs && vite",

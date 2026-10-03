@@ -68,3 +68,13 @@ npm run check:live -- --packaged
 真实账号服务验证可显式设置 `WEFLOW_IMAGE_ACCOUNT`（含 db_storage 的账号目录）、`WEFLOW_USER_DATA_PATH`（WeFlow profile）后运行 `node scripts/check-image-services.cjs`。它只读源数据库与附件，使用应用图片缓存和加密配置；不发送消息。设置 `WEFLOW_IMAGE_RESOURCES` 为 win-unpacked/resources 可验证冻结后端。
 
 实现和契约见 [架构](live-architecture.md)、[规格](live-spec.md)、[接入方案](live-integration-plan.md)，历史实验依据见 [在线读取实验](online-read-experiment.md)。
+
+## 启动聊天路由回归（2026-10-03）
+
+使用现有真实 profile 复现启动后立即点击聊天：原版本从 `/chat` 跳到 `/`，随后自动连接完成跳到 `/home`，聊天页被卸载。原因是 RouteGuard 在异步启动连接完成前使用初始 `isDbConnected=false` 执行重定向。
+
+AppStore 增加 `isDbInitializing`，App 自动连接在 `finally` 结束初始化状态。连接未完成时，受保护页面保持请求路由并显示连接提示，连接失败或缺少配置后才沿用未连接时的重定向。过期的启动连接结果不更新当前页面。
+
+`npm run check:startup` 使用合成账号，`npm run check:startup -- --user-data <现有 profile>` 可只读复测已有账号；加 `--packaged` 验证打包资源。测试不手动连接、不清理缓存、不修复真实配置，直接点击侧栏聊天并逐帧检查路由保留，然后打开第一个会话。源码和打包资源的合成账号（3 个会话）、现有真实账号（416 个会话）均通过。
+
+热加载回归在断言末尾消息前等待 Virtuoso 的实际底部位置稳定，避免新增消息后虚拟列表仍在测量高度时把屏外内容误判为更新失败。

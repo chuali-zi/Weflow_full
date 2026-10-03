@@ -3,6 +3,7 @@ import { create } from 'zustand'
 export interface AppState {
   // 数据库状态
   isDbConnected: boolean
+  isDbInitializing: boolean
   dbPath: string | null
   myAccountId: string | null
 
@@ -23,6 +24,7 @@ export interface AppState {
 
   // 操作
   setDbConnected: (connected: boolean, path?: string) => void
+  setDbInitializing: (initializing: boolean) => void
   setMyAccountId: (accountId: string) => void
   setLoading: (loading: boolean, text?: string) => void
 
@@ -42,6 +44,7 @@ export interface AppState {
 
 export const useAppStore = create<AppState>((set) => ({
   isDbConnected: false,
+  isDbInitializing: true,
   dbPath: null,
   myAccountId: null,
   isLoading: false,
@@ -59,6 +62,7 @@ export const useAppStore = create<AppState>((set) => ({
     isDbConnected: connected,
     dbPath: path ?? null
   }),
+  setDbInitializing: (initializing) => set({ isDbInitializing: initializing }),
 
   setMyAccountId: (accountId) => set({ myAccountId: accountId }),
 
@@ -77,6 +81,7 @@ export const useAppStore = create<AppState>((set) => ({
 
   reset: () => set({
     isDbConnected: false,
+    isDbInitializing: false,
     dbPath: null,
     myAccountId: null,
     isLoading: false,
