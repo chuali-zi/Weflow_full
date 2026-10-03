@@ -24,6 +24,11 @@ WIDE_KEY = re.compile(rb'(?:[A-Za-z0-9]\x00){16,32}')
 
 
 def image_header(data):
+    if len(data) >= 16 and data[4:8] == b'ftyp':
+        end = min(len(data), int.from_bytes(data[:4], 'big'))
+        if any(data[i:i+4] in {b'heic', b'heix', b'hevc', b'hevx'}
+               for i in range(8, end-3, 4) if i != 12):
+            return True
     return (data.startswith(b'\xff\xd8\xff') or data.startswith(b'\x89PNG\r\n\x1a\n')
             or data.startswith((b'GIF87a', b'GIF89a', b'wxgf'))
             or (data[:4] == b'RIFF' and data[8:12] == b'WEBP'))

@@ -9,6 +9,7 @@ import { ConfigService } from './config'
 import { wcdbService } from './wcdbService'
 import { decryptDatViaNativeAsync, nativeAddonLocation } from './nativeImageDecrypt'
 import { KeyProviderService } from './keyProviderService'
+import { heicToJpeg, isHeic } from './heicDecoder'
 
 // 获取 ffmpeg-static 的路径
 function getStaticFfmpegPath(): string | null {
@@ -765,6 +766,11 @@ export class ImageDecryptService {
       if (!this.isOperationCurrent(context)) return this.finalizeOperationResult(context, this.getStaleOperationResult())
       decrypted = wxgfResult.data
 
+      if (isHeic(decrypted)) {
+        decrypted = await heicToJpeg(decrypted)
+        if (!this.isOperationCurrent(context)) return this.getStaleOperationResult()
+      }
+
       const detectedExt = this.detectImageExtension(decrypted)
 
       // 如果解密产物无法识别为图片，归类为“解密失败”。
@@ -828,7 +834,7 @@ export class ImageDecryptService {
     } catch (e) {
       this.logError('解密失败', e, { md5: payload.imageMd5, datName: payload.imageDatName })
       this.emitDecryptProgress(payload, cacheKey, 'failed', 100, 'error', String(e))
-      return { success: false, error: String(e), failureKind: 'not_found' }
+      return { success: false, error: String(e), failureKind: 'decrypt_failed' }
     }
   }
 
@@ -2254,6 +2260,7 @@ export class ImageDecryptService {
       const encrypted = await readFile(datPath)
       const directExt = this.detectImageExtension(encrypted)
       if (directExt) return { data: encrypted, ext: directExt, isWxgf: false }
+      if (isHeic(encrypted)) return { data: encrypted, ext: '.heic', isWxgf: false }
 
       const candidates: Buffer[] = []
       const aesKeyText = String(aesKey || '').trim()
@@ -2270,6 +2277,7 @@ export class ImageDecryptService {
       for (const candidate of candidates) {
         const ext = this.detectImageExtension(candidate)
         if (candidate.subarray(0, 4).toString('ascii') === 'wxgf') return { data: candidate, ext: '.wxgf', isWxgf: true }
+        if (isHeic(candidate)) return { data: candidate, ext: '.heic', isWxgf: false }
         if (ext) return { data: candidate, ext, isWxgf: false }
       }
     } catch (error) {

@@ -92,6 +92,8 @@ npm run package:win
 
 感谢 **cc / hicccc77** 和 [WeFlow 的所有贡献者](https://github.com/hicccc77/WeFlow/graphs/contributors) 提供完整的聊天界面、查询与导出功能，让本分支能够在已有成果上接入本地解密和 Agent 使用流程。也感谢 SQLCipher、SQLite、Microsoft Windows API、Zstandard 等项目的公开文档，以及 wxtext 研发时使用的公开参考资料，具体链接见 [研发依据](docs/wxtext-architecture.md#研发依据)。
 
+HEIC 原图预览使用 [heic-decode](https://github.com/catdad-experiments/heic-decode)（ISC）和其依赖 [libheif-js](https://github.com/catdad-experiments/libheif-js)（LGPL-3.0），感谢这些项目的维护者。组件保留各自的许可，使用未修改的 npm 发布版本；源码和许可可在对应仓库及随包依赖中查看。
+
 本仓库是独立维护的衍生版本。上游说明原文保存在 [README.upstream.md](README.upstream.md)，其中的功能说明与下载链接对应上游版本。
 
 ## 许可证

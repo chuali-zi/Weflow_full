@@ -26,3 +26,9 @@ class ImageKeyTests(unittest.TestCase):
         plain = b'wxgf' + bytes(range(80))
         encrypted = encode_v2(plain)
         self.assertEqual(decrypt_v2(encrypted, b'0123456789abcdef', 0x53), plain)
+
+    def test_heic_header_with_compatible_brand_is_accepted(self):
+        plain = struct.pack('>I', 24) + b'ftypmif1' + bytes(4) + b'heicmif1' + bytes(range(80))
+        encrypted = encode_v2(plain)
+        self.assertEqual(decrypt_v2(encrypted, b'0123456789abcdef', 0x53), plain)
+        self.assertTrue(validated(b'0123456789abcdef', [(None, encrypted[15:63], 32, b'')]))

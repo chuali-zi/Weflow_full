@@ -245,6 +245,19 @@ export default defineConfig({
         }
       },
       {
+        entry: 'electron/heicDecodeWorker.ts',
+        onstart: handleElectronOnStart,
+        vite: {
+          build: {
+            outDir: 'dist-electron',
+            rollupOptions: {
+              external: ['heic-decode', 'sharp'],
+              output: { entryFileNames: 'heicDecodeWorker.js', codeSplitting: false }
+            }
+          }
+        }
+      },
+      {
         entry: 'electron/imageDecryptWorker.ts',
         onstart: handleElectronOnStart,
         vite: {

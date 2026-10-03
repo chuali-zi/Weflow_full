@@ -208,4 +208,6 @@ BUSY / LOCKED 每次等候 ≤250 ms，1、2、5 秒退避；普通查询执行�
 
 本次范围是已在本机落盘的 V2 聊天图片，既有 wxgf 转换流程继续使用。微信尚未下载的图片不会凭空恢复，不执行 CDN 下载或微信 UI 自动点击。其他媒体类型继续按原能力范围说明。
 
+V2 解密后的内容也可能是 HEIC 原图。按 `ftyp` 的主品牌及兼容品牌识别 HEIC，使用独立 Worker 中的 heic-decode/libheif-js 解码，再由 Sharp 生成 JPEG 预览缓存；保留完整宽高，源 DAT 不改动。HEIC 标识也纳入图片密钥验证的合法格式，不能将已正确解密的 HEIC 归为密钥错误。转换失败返回 `decrypt_failed`，聊天页沿用既有重试流程。
+
 技术参考：[wechatauto-replica 图片格式与派生流程](https://github.com/fanyuantaier/wechatauto-replica/blob/main/wechatauto/media.py)、[global_config 布局](https://github.com/fanyuantaier/wechatauto-replica/blob/main/wechatauto/db.py)；实现复用本仓库现有 Windows 只读访问、密钥缓存和 JS 解密服务。

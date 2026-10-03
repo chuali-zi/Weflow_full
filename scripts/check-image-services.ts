@@ -1,7 +1,8 @@
 // Read-only real-account verification. Only image caches and protected image
 // keys are written, through the same services used by the GUI.
-import { app } from 'electron'
-import { join } from 'path'
+import { app, BrowserWindow } from 'electron'
+import { basename, join } from 'path'
+import { readFileSync } from 'fs'
 import sharp from 'sharp'
 import { wcdbService } from '../electron/services/wcdbService'
 import { ImageDecryptService } from '../electron/services/imageDecryptService'
@@ -25,14 +26,26 @@ app.whenReady().then(async () => {
     const keyCheck = await new KeyProviderService().autoGetImageKey(join(config.get('dbPath'), config.get('myAccountId')), undefined, config.get('myAccountId'))
     if (!keyCheck.success || !keyCheck.verified) throw new Error('Settings image-key lookup failed')
     if (!await wcdbService.open(account, config.get('decryptKey'), 'live')) throw new Error('Database open failed')
+    const limit = Math.max(1, Math.min(1000, Number(process.env.WEFLOW_IMAGE_LIMIT) || 20))
+    const order = process.env.WEFLOW_IMAGE_SAMPLE === 'spread' ? 'md5' : 'changed DESC'
+    const selectedFiles: string[] = process.env.WEFLOW_IMAGE_FILES
+      ? JSON.parse(readFileSync(process.env.WEFLOW_IMAGE_FILES, 'utf8')).map((file: string) => basename(file)) : []
+    if (selectedFiles.some(file => !/^[a-f0-9]{32}(?:_[ht])?\.dat$/i.test(file))) throw new Error('Invalid sample filename')
+    const selection = selectedFiles.length ? `WHERE file_name IN (${selectedFiles.map(file => `'${file}'`).join(',')})` : ''
     const rows = await wcdbService.execQuery('hardlink', join(account, 'db_storage/hardlink/hardlink.db'),
-      'SELECT md5, MAX(modify_time) AS changed FROM image_hardlink_info_v4 GROUP BY md5 ORDER BY changed DESC LIMIT 40')
+      `SELECT md5, MAX(modify_time) AS changed FROM image_hardlink_info_v4 ${selection} GROUP BY md5 ORDER BY ${order} LIMIT ${limit * 3}`)
     if (!rows.success) throw new Error(rows.error)
     const service = new ImageDecryptService()
-    let located = 0, decrypted = 0, decoded = 0
+    if (process.env.WEFLOW_IMAGE_FRESH === '1') {
+      // Exercise the decoder even when an earlier run generated a disk cache.
+      Object.defineProperty(service, 'findCachedOutputByDatPath', { value: () => null })
+    }
+    let located = 0, decrypted = 0, decoded = 0, rendered = 0
+    const preview = selectedFiles.length ? new BrowserWindow({ show: false }) : undefined
+    if (preview) await preview.loadURL('about:blank')
     const failures: string[] = []
     for (const row of rows.rows || []) {
-      if (located >= 20) break
+      if (located >= limit) break
       const link = await wcdbService.resolveImageHardlink(row.md5, account)
       if (!link.success) continue
       located++
@@ -41,12 +54,23 @@ app.whenReady().then(async () => {
       if (!result.success || !result.localPath) { failures.push(result.error || 'decrypt failed'); continue }
       decrypted++
       try {
-        await sharp(result.localPath).raw().toBuffer()
+        const pixels = await sharp(result.localPath).raw().toBuffer({ resolveWithObject: true })
         decoded++
+        if (preview) {
+          const image = `data:image/jpeg;base64,${readFileSync(result.localPath).toString('base64')}`
+          const size = await preview.webContents.executeJavaScript(`new Promise((resolve, reject) => {
+            const img = new Image(); img.onload = () => resolve([img.naturalWidth, img.naturalHeight]);
+            img.onerror = () => reject(new Error('Renderer rejected image')); img.src = ${JSON.stringify(image)};
+          })`)
+          if (size[0] !== pixels.info.width || size[1] !== pixels.info.height) throw new Error('Renderer dimensions differ')
+          rendered++
+        }
       } catch { failures.push('Image decoder rejected output') }
+      if (located % 50 === 0) console.log('IMAGE CHECK PROGRESS', JSON.stringify({ located, decrypted, decoded }))
     }
-    console.log('REAL IMAGE RESULT', JSON.stringify({ settingsKeyLookup: true, located, decrypted, decoded, failures }))
-    if (located > 0 && decoded === located) code = 0
+    preview?.destroy()
+    console.log('REAL IMAGE RESULT', JSON.stringify({ settingsKeyLookup: true, located, decrypted, decoded, rendered, failures }))
+    if (located > 0 && decoded === located && (!selectedFiles.length || rendered === located)) code = 0
   } catch (error) { console.error(String(error)) }
   finally { await wcdbService.shutdown(); app.exit(code) }
 })
