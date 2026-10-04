@@ -8,6 +8,7 @@ import { clearCursors, getChatOverview, getMessageContext, readMessages, searchM
 import { accountScope, chatId, messageId, personId } from '../shared/chat/ids'
 import { normalizeMessage } from '../shared/chat/normalize'
 import { exportMessages } from '../mcp/export'
+import { createTools } from '../mcp/tools'
 
 test('MCP publishes the reading tools and bulk export with closed input objects', () => {
   assert.deepEqual(TOOL_DEFINITIONS.map(tool => tool.name), [
@@ -15,6 +16,8 @@ test('MCP publishes the reading tools and bulk export with closed input objects'
   ])
   for (const tool of TOOL_DEFINITIONS) {
     assert.equal((tool.inputSchema as any).additionalProperties, false)
+    assert.equal(tool.inputSchema.type, 'object')
+    for (const keyword of ['oneOf', 'anyOf', 'allOf']) assert.equal(tool.inputSchema[keyword], undefined)
     assert.ok(tool.outputSchema)
   }
 })
@@ -95,6 +98,26 @@ class FakeRuntime {
   }
 }
 const fixedRange = { start: '2026-09-01T00:00:00Z', end: '2026-10-04T00:00:00Z' }
+
+test('flat schemas still enforce first-call requirements and cursor-only continuation', async () => {
+  clearCursors()
+  const tools = createTools(new FakeRuntime() as any)
+  try {
+    for (const [name, args] of [
+      ['read_messages', {}], ['get_chat_overview', { chat_ids: [chatId(scope, 'a')] }],
+      ['search_messages', { range: fixedRange }], ['get_message_context', {}],
+      ['read_messages', { cursor: 'missing', chat_ids: [chatId(scope, 'a')] }],
+      ['find_chats', { cursor: '' }],
+    ] as const) {
+      const output = await tools.call(name, args)
+      assert.equal((output.structuredContent.error as any).code, 'INVALID_ARGUMENT')
+    }
+    const first = await tools.call('read_messages', { chat_ids: [chatId(scope, 'a')] })
+    assert.equal(first.structuredContent.success, true)
+    const continued = await tools.call('read_messages', { cursor: 'missing' })
+    assert.equal((continued.structuredContent.error as any).code, 'CURSOR_EXPIRED')
+  } finally { await tools.close() }
+})
 
 test('read emits buffered rows after the raw cursor is done and resumes one message at a time', async () => {
   clearCursors()

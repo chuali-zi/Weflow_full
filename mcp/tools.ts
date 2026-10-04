@@ -1,4 +1,4 @@
-import { TOOL_DEFINITIONS, type ToolData } from './contracts'
+import { TOOL_DEFINITIONS, argumentSchema, type ToolData } from './contracts'
 import { attachCursorInvalidation, clearCursors, findChats, getChatOverview, getMessageContext, getStatus, readMessages, searchMessages } from './query'
 import type { McpRuntime } from './runtime'
 import { personId } from '../shared/chat/ids'
@@ -61,7 +61,7 @@ export function createTools(runtime: McpRuntime): { call(name: string, args: unk
     async call(name, args, signal, onProgress) {
       if (!definitions.has(name)) return result(failData(runtime, Object.assign(new Error(`未知工具：${name}`), { code: 'UNKNOWN_TOOL' })))
       if (!validObject(args)) return result(failData(runtime, Object.assign(new Error('工具参数必须是 JSON 对象。'), { code: 'INVALID_ARGUMENT' })))
-      const schemaError = validate(args, (definitions.get(name) as any).inputSchema)
+      const schemaError = validate(args, argumentSchema(definitions.get(name)!.inputSchema, args))
       if (schemaError) return result(failData(runtime, Object.assign(new Error(schemaError), { code: 'INVALID_ARGUMENT' })))
       try {
         let data: ToolData

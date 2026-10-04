@@ -12,9 +12,18 @@ export const READ_DEFAULT_MAX_CHARS = 120_000
 export const READ_MAX_LIMIT = 10_000
 export const READ_MAX_CHARS = 2_000_000
 const messageTypes = { type: 'array', items: { type: 'string', enum: ['text','image','voice','video','file','link','quote','forwarded','location','system','other'] } }
+const pagedRequired = new WeakMap<JsonSchema, string[]>()
 const paged = (properties: Record<string, JsonSchema>, required: string[] = []): JsonSchema => {
-  const { cursor: cursorProperty, ...firstProperties } = properties
-  return { type: 'object', properties, additionalProperties: false, oneOf: [obj(firstProperties, required), obj({ cursor: cursorProperty || cursor.cursor }, ['cursor'])] }
+  // Flat object schemas also work in clients that reject root-level unions.
+  const schema = { ...obj(properties), description: `${required.length ? `首次调用必填：${required.join('、')}。` : ''}续读时只提交 cursor。` }
+  pagedRequired.set(schema, required)
+  return schema
+}
+export function argumentSchema(schema: JsonSchema, args: Record<string, unknown>): JsonSchema {
+  const required = pagedRequired.get(schema)
+  if (!required) return schema
+  const { cursor: cursorProperty, ...firstProperties } = schema.properties as Record<string, JsonSchema>
+  return 'cursor' in args ? obj({ cursor: cursorProperty }, ['cursor']) : obj(firstProperties, required)
 }
 const outputSchema: JsonSchema = {
   type: 'object', required: ['schema_version', 'success', 'account', 'timezone', 'data', 'coverage', 'freshness', 'warnings', 'error'],

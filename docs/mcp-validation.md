@@ -15,7 +15,7 @@ Python 新增准备状态读取、打开已有数据、精确消息定位、邻�
 | 检查 | 结果 |
 | --- | --- |
 | 后端回归 `npm run test:backend` 对应 Python unittest 套件 | 37 项通过。 |
-| MCP 回归 `npm run test:mcp` | 29 项全部通过，覆盖消息标识、归一化、媒体、名称、游标、扫描、回复、profile、取消、连接恢复、紧凑格式及万条导出。 |
+| MCP 回归 `npm run test:mcp` | 30 项全部通过，覆盖消息标识、归一化、媒体、名称、游标、扫描、回复、profile、取消、连接恢复、紧凑格式、万条导出及客户端兼容的参数声明。 |
 | `npm run typecheck`、`npm run build:app` | renderer/Electron 类型检查与桌面构建通过。 |
 | `npm run build:mcp` | MCP 类型检查、server.cjs 与 HEIC worker 构建通过。 |
 | `npm run check:desktop` | 真实 Electron IPC、Worker、聊天读取、搜索及 TXT/HTML/JSON/WeClone 导出通过。 |
@@ -35,7 +35,11 @@ live 检查通过独立进程向合成 SQLCipher 库追加消息并 COMMIT，然
 
 ## 验证边界
 
-当前 MCP 验证使用合成数据和官方 Node MCP 客户端；未在本轮读取真实账号，也未验收第三方客户端的图片呈现。合成媒体测试验证 DAT 解密、图片输出预算、缺本机文件、缺图片密钥、类型识别和取消。尚未新增语音转写、OCR、视频播放、语义检索和完整群成员查询。
+基线与批量读取验证使用合成数据和官方 Node MCP 客户端。2026-10-04 另按用户授权，在已有 Windows 环境使用 Claude Code 2.1.234 实测卸载、安装及真实账号的指定会话查询；聊天正文、账号标识、密钥和原始日志均未写入仓库。本轮未验收第三方客户端的图片呈现。合成媒体测试验证 DAT 解密、图片输出预算、缺本机文件、缺图片密钥、类型识别和取消。尚未新增语音转写、OCR、视频播放、语义检索和完整群成员查询。
+
+客户端联调发现并修复两个兼容性问题：环境准备显式加载当前 PowerShell 的 Utility 模块，避免继承的其他版本模块遮蔽 `Get-FileHash`；分页工具改用平铺对象输入声明，避免部分客户端跳过带顶层 `oneOf` 的工具。首次调用的必填参数及 cursor-only 续读约束仍由服务端执行，并有回归覆盖。只提供仓库 URL 的提示词没有触发安装；加入按 `installed.md` 安装并接入当前客户端的简短任务后，Agent 才执行完整安装流程。
+
+修复后再次用卸载脚本移除 Claude Code 用户级注册，随后运行 `claude -p` 完成安装、CLI 验证和 stdio 连接验收。新启动的查询进程加载全部 8 个工具，直接调用 `find_chats` 和 `read_messages` 成功返回指定会话最新消息，未回退到 CLI。该次查询为 3 轮、约 47.6 秒；这是包含模型推理的本机端到端耗时，不代表数据库查询耗时或稳定性统计。测试复用已有依赖和已认证密钥，不覆盖无环境、无密钥的首次安装。实际 CLI 为 Claude Code 2.1.234，沿用本机配置的 `glm-5.3[1m]` 模型。
 
 Windows 联调使用 `release/mcp preview/win-unpacked`。`npm run package:win` 已接入 MCP 构建与资源复制，可生成包含 MCP 的新安装包；旧 `release` 安装程序不代表本轮构建。
 

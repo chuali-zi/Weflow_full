@@ -181,6 +181,18 @@ export_messages
 
 最后向用户简短报告：安装目录、使用的 profile 与账号、读取模式、目标智能体或客户端、MCP 名称与配置位置、CLI 验证结果、工具列表与 `get_status` 的实际验证结果。如需用户登录、重新加载或新开会话，说明哪个步骤尚未完成及下一步操作。不要输出原始密钥或聊天正文。
 
+## 卸载 MCP 接入
+
+在本仓库目录使用卸载脚本，指定需要移除的客户端。脚本调用客户端自己的移除命令，只卸载所选 MCP 注册，保留 WeFlow 程序、profile、已认证密钥和微信数据，便于之后重新安装。
+
+```powershell
+# 按目标客户端选择一条执行。
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\uninstall-mcp.ps1 -Client codex
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\uninstall-mcp.ps1 -Client claude -Scope user
+```
+
+使用 `-Name` 指定安装时选择的其他服务名称。脚本当前支持上述两个 CLI；其他客户端使用其 MCP 管理入口移除对应服务。CLI 不在 PATH 时可用 `-Cli '完整路径\客户端.exe'`。`-WhatIf` 只预览操作。项目或本地范围的注册，在相应项目目录调用脚本，并为支持该选项的客户端指定 `-Scope project` 或 `-Scope local`。移除后重新加载 MCP 或新开会话，已有会话可能仍保留工具。
+
 ## 常见报错与恢复
 
 先读返回的 `code`、`action` 和 `details`，每次只处理当前失败原因。CLI 普通成功/失败结果在 stdout 中是一个 JSON 对象，进度可能在 stderr；`--help` 是普通文本。完整退出码见 [CLI 文档](docs/cli.md#输出与退出码)。
@@ -190,6 +202,7 @@ export_messages
 | PowerShell 找不到 `weflow.cmd` | 进入正确目录，并使用 `.\weflow.cmd`；调用绝对路径时使用 `& '完整路径\weflow.cmd'`。 |
 | `node` / `npm` 不在 PATH，或 Node 版本过低 | 源码版重跑 `launch.ps1 -SetupOnly`，按第 2 节使用本地便携 Node 和 `npm.cmd`。安装版检查包内资源，不要求额外安装环境。 |
 | PowerShell 拦截 `npm.ps1` / 脚本执行策略 | 使用 `npm.cmd`；启动项目脚本使用本文的 `powershell.exe -ExecutionPolicy Bypass -File ...`，不用修改全局执行策略。 |
+| PowerShell 找不到 `Get-FileHash` 等内置命令 | 检查宿主进程是否传入了其他 PowerShell 版本的模块路径。使用新版 `launch.ps1`，它会显式加载当前 PowerShell 自带的 Utility 模块，无需修改全局环境。 |
 | `ERESOLVE` 依赖冲突 | 项目安装脚本已使用 `npm ci --legacy-peer-deps`。手动恢复时使用同样方式，不要随意升级 React 或重写锁文件。 |
 | 下载超时、`ECONNRESET`、Electron 二进制缺失 | 检查当前网络后重跑准备脚本。项目的 `scripts/ensure-electron.cjs` 会尝试下载源；依赖目录已存在时可用选定的 Node 执行它，再重跑准备脚本。不要关闭 TLS 校验。 |
 | `MCP is not built` / 找不到 `build/mcp/server.cjs` | 源码版准备依赖后执行 `npm run build:mcp`。安装版检查 `resources/mcp/server.cjs`；缺少则换用含 MCP 的构建或源码流程。 |
