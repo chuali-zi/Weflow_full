@@ -153,6 +153,14 @@ class Backend:
         root = account_root(accountDir or self.state.settings().get('data_dir'), accountId)
         return acquire(root.parent, self.state, self.source(), self.progress, refresh)
 
+    def getCachedImageKeys(self, accountDir=None, **_):
+        from .image_keys import read_cached
+        self._check_limits()
+        root = account_root(accountDir or self.state.settings().get('data_dir'))
+        result = read_cached(root.parent, self.state)
+        self._check_limits()
+        return result
+
     @live_query
     def resolveImageHardlink(self, md5, accountDir=None, **_):
         if not re.fullmatch(r'[0-9a-fA-F]{32}', md5 or ''):
@@ -204,6 +212,53 @@ class Backend:
         if not directory.is_relative_to(path.parent.resolve()) or not directory.is_dir():
             raise ToolError("SNAPSHOT_REQUIRED", "记录副本已不存在，请重新准备。")
         return value
+
+    def getPreparedSelection(self, dataDir=None, **_):
+        self._check_limits()
+        settings = self.state.settings()
+        value = dataDir or settings.get("data_dir")
+        if value:
+            root = account_root(value)
+        else:
+            choices = [item["dataDir"] for item in discover_data_dir_records()]
+            if len(choices) != 1:
+                raise ToolError("ACCOUNT_REQUIRED", "请选择要读取的微信账号目录。",
+                                details={"candidates": [str(path) for path in choices]})
+            root = choices[0].resolve()
+        saved_mode = (settings.get("database_modes") or {}).get(self.state._mode_key(root))
+        result = {"success": True, "dataDir": str(root), "accountId": clean_id(root.parent.name),
+                  "savedMode": saved_mode}
+        self._check_limits()
+        return result
+
+    def openPreparedData(self, accountDir=None, dataDir=None, mode=None, **_):
+        self._check_limits()
+        selection = self.getPreparedSelection(dataDir or accountDir)
+        root = Path(selection["dataDir"])
+        selected_mode = mode or selection["savedMode"] or "live"
+        if selected_mode not in {"live", "snapshot"}:
+            raise ToolError("INVALID_MODE", "读取模式必须是 snapshot 或 live。")
+        if selected_mode == "snapshot":
+            meta = self.read_active(root)  # Deliberately never calls ensure_snapshot.
+            if self.meta and self.mode == "snapshot" and meta["directory"] == self.meta["directory"] and root == self.root:
+                self._check_limits()
+                return {"success": True, **selection, "mode": selected_mode,
+                        "capturedAt": meta.get("capturedAt"),
+                        "snapshotId": hashlib.sha256(str(Path(meta["directory"]).resolve()).encode()).hexdigest()[:16],
+                        "connectionId": None, "revision": 0}
+            self.close()
+            self.root, self.meta, self.owner = root, meta, meta["accountId"]
+            self.mode, self.connection_id, self.revision = "snapshot", None, 0
+            self.connection("contact/contact.db")
+            captured_at = meta.get("capturedAt")
+            snapshot_id = hashlib.sha256(str(Path(meta["directory"]).resolve()).encode()).hexdigest()[:16]
+        else:
+            self._open_live(root)
+            captured_at, snapshot_id = None, None
+        self._check_limits()
+        return {"success": True, **selection, "mode": selected_mode,
+                "capturedAt": captured_at, "snapshotId": snapshot_id,
+                "connectionId": self.connection_id, "revision": self.revision}
 
     def discover(self, **_):
         records = discover_data_dir_records()
@@ -419,6 +474,7 @@ class Backend:
 
     def getConnectionStatus(self, dataDir=None, mode=None, **_):
         if self.mode == "live" and self.meta is not None:
+            self._pending_events.extend(self.pollLiveChanges())
             return self._status_payload()
         if self.mode == "snapshot" and self.meta is not None:
             return {"success": True, "mode": "snapshot", "state": "ready",
@@ -1051,7 +1107,8 @@ class Backend:
             if table:
                 yield relative, connection, table
 
-    def shard_messages(self, relative, connection, table, ascending, begin, end, limit=None, after=None):
+    def shard_messages(self, relative, connection, table, ascending, begin, end, limit=None, after=None,
+                       exact=None):
         available = columns(connection, table)
         required = {"local_id", "local_type", "create_time", "message_content", "real_sender_id"}
         if required - available:
@@ -1069,10 +1126,17 @@ class Backend:
         if end:
             where.append("m.create_time <= ?")
             params.append(end)
+        if exact:
+            for name, value in exact.items():
+                if name not in available:
+                    raise ToolError("UNSUPPORTED_SCHEMA", "消息表缺少精确定位字段。",
+                                    details={"file": relative, "missing_columns": [name]})
+                where.append(f"m.{name}=?")
+                params.append(value)
         if after:
             comparator = ">" if ascending else "<"
             where.append(f"(m.create_time, {sequence}, m.local_id, ?) {comparator} (?, ?, ?, ?)")
-            params.extend([str(self.root / relative), *after])
+            params.extend([relative, *after])
         sql = f"SELECT m.*, n.user_name AS sender_username FROM {quoted(table)} m LEFT JOIN {quoted(mapping)} n ON n.rowid=m.real_sender_id"
         if where:
             sql += " WHERE " + " AND ".join(where)
@@ -1096,7 +1160,8 @@ class Backend:
             row["computed_is_send"] = int(row["sender_username"] == self.owner)
             row["server_id"] = str(row.get("server_id") or 0)
             row.setdefault("sort_seq", row["local_id"])
-            row.update(_db_path=str(self.root / relative), _db_name=Path(relative).name, _table_name=table)
+            row.update(_db_path=str(self.root / relative), _db_name=Path(relative).name,
+                       _relative_db=relative, _table_name=table)
             yield row
 
     def message_stream(self, session_id, ascending=True, begin=0, end=0, limit=None, after=None):
@@ -1113,7 +1178,7 @@ class Backend:
         else:
             streams = [self.shard_messages(relative, conn, table, ascending, begin, end, limit, after)
                        for relative, conn, table in self.message_tables(session_id)]
-        key = lambda row: (int(row["create_time"]), int(row["sort_seq"]), int(row["local_id"]), row["_db_path"])
+        key = lambda row: (int(row["create_time"]), int(row["sort_seq"]), int(row["local_id"]), row["_relative_db"])
         seen = {}
         for row in heapq.merge(*streams, key=key, reverse=not ascending):
             self._check_limits()
@@ -1154,15 +1219,69 @@ class Backend:
                 self.end_request()
 
     @live_query
-    def openMessageCursor(self, sessionId, batchSize=100, ascending=False, beginTimestamp=0, endTimestamp=0, **_):
+    def openMessageCursor(self, sessionId, batchSize=100, ascending=False, beginTimestamp=0, endTimestamp=0,
+                          afterPosition=None, **_):
+        after = tuple(afterPosition) if afterPosition is not None else None
+        if after is not None and (len(after) != 4 or not isinstance(after[3], str)):
+            raise ToolError("INVALID_LOCATOR", "消息续读位置无效。")
         self.next_cursor += 1
         if self.mode == "live":
             self.cursors[self.next_cursor] = {"session": sessionId, "size": max(1, batchSize),
                 "ascending": bool(ascending), "begin": beginTimestamp, "end": endTimestamp,
-                "revision": self.revision, "position": None, "seen": {}}
+                "revision": self.revision, "position": after, "seen": {}}
             return {"success": True, "cursor": self.next_cursor, "revision": self.revision}
-        self.cursors[self.next_cursor] = [iter(self.message_stream(sessionId, ascending, beginTimestamp, endTimestamp)), max(1, batchSize)]
+        self.cursors[self.next_cursor] = [iter(self.message_stream(sessionId, ascending, beginTimestamp,
+            endTimestamp, after=after)), max(1, batchSize)]
         return {"success": True, "cursor": self.next_cursor}
+
+    @live_query
+    def getMessageByLocator(self, sessionId, locator=None, **flat):
+        connection_id, revision = self.connection_id, self.revision
+        locator = dict(locator or {})
+        locator.update({key: value for key, value in flat.items() if key in
+                        {"serverId", "relativeDb", "table", "localId", "createTime"} and value is not None})
+        relative, table = locator.get("relativeDb"), locator.get("table")
+        exact = {}
+        if locator.get("serverId") is not None:
+            exact["server_id"] = locator["serverId"]
+        else:
+            if not all(locator.get(key) is not None for key in ("relativeDb", "table", "localId", "createTime")):
+                raise ToolError("INVALID_LOCATOR", "消息定位信息不完整。")
+            if relative not in self.meta["files"] or not re.fullmatch(r"message/message_\d+\.db", relative):
+                raise ToolError("INVALID_LOCATOR", "消息来源不在当前账号数据库白名单内。")
+            catalog = tables(self.connection(relative))
+            actual = catalog.get(str(table).lower())
+            if not actual or actual.lower() != message_table(sessionId).lower():
+                raise ToolError("INVALID_LOCATOR", "消息表不在当前数据库白名单内。")
+            table = actual
+            exact = {"local_id": locator["localId"], "create_time": locator["createTime"]}
+        found = []
+        sources = [(relative, self.connection(relative), table)] if relative else list(self.message_tables(sessionId))
+        for db, conn, tab in sources:
+            if tab is None:
+                continue
+            with self._transaction(conn):
+                rows = self.shard_messages(db, conn, tab, True, 0, 0, exact=exact)
+                for row in rows:
+                    if locator.get("serverId") is None or str(row.get("server_id")) == str(locator["serverId"]):
+                        found.append(row)
+        if not found:
+            raise ToolError("MESSAGE_NOT_FOUND", "找不到对应的本地消息。")
+        signatures = {message_signature(row) for row in found}
+        if len(signatures) > 1:
+            raise ToolError("MESSAGE_CONFLICT", "同一消息 ID 在分库中出现冲突。")
+        self._pending_events.extend(self.pollLiveChanges())
+        if connection_id != self.connection_id or revision != self.revision:
+            raise ToolError("CURSOR_STALE", "读取期间数据库版本发生变化，请重新定位消息。")
+        return {"success": True, "message": found[0]}
+
+    @live_query
+    def openMessageCursorAround(self, sessionId, anchorLocator, direction="asc", batchSize=100, **_):
+        if direction not in {"asc", "desc"}:
+            raise ToolError("INVALID_DIRECTION", "direction 必须是 asc 或 desc。")
+        anchor = self.getMessageByLocator(sessionId, anchorLocator)["message"]
+        position = [anchor["create_time"], anchor["sort_seq"], anchor["local_id"], anchor["_relative_db"]]
+        return self.openMessageCursor(sessionId, batchSize, direction == "asc", afterPosition=position)
 
     def _live_page(self, state):
         rows, position = [], state["position"]
@@ -1173,7 +1292,7 @@ class Backend:
             if not candidates:
                 break
             for row in candidates:
-                key = (int(row["create_time"]), int(row["sort_seq"]), int(row["local_id"]), row["_db_path"])
+                key = (int(row["create_time"]), int(row["sort_seq"]), int(row["local_id"]), row["_relative_db"])
                 position = key
                 server = row["server_id"]
                 if server != "0":
@@ -1192,7 +1311,7 @@ class Backend:
         rows = rows[:state["size"]]
         if rows:
             last = rows[-1]
-            state["position"] = (int(last["create_time"]), int(last["sort_seq"]), int(last["local_id"]), last["_db_path"])
+            state["position"] = (int(last["create_time"]), int(last["sort_seq"]), int(last["local_id"]), last["_relative_db"])
             for row in rows:
                 if row["server_id"] != "0":
                     state["seen"][row["server_id"]] = message_signature(row)
@@ -1207,7 +1326,12 @@ class Backend:
             if state["revision"] != self.revision:
                 self.cursors.pop(cursor, None)
                 raise ToolError("CURSOR_STALE", "数据库已发生变化，请重新加载消息页。")
-            return self._live_page(state)
+            result = self._live_page(state)
+            self._pending_events.extend(self.pollLiveChanges())
+            if state["revision"] != self.revision:
+                self.cursors.pop(cursor, None)
+                raise ToolError("CURSOR_STALE", "读取期间数据库版本发生变化，请重新打开聊天。")
+            return result
         iterator, size = self.cursors[cursor]
         rows = list(itertools.islice(iterator, size))
         sentinel = object()
@@ -1342,6 +1466,7 @@ class Backend:
         simple = {"discover", "prepareKeys", "getImageKeys", "resolveImageHardlink", "resolveImageHardlinkBatch", "createSnapshot", "status", "snapshotConfig", "connectionConfig", "getConnectionStatus", "setReadMode", "exportRaw", "open", "close", "testConnection",
                   "execQuery", "getContact", "getContactsCompact", "listMessageDbs", "listMediaDbs", "getSessions",
                   "getMessages", "openMessageCursor", "fetchMessageBatch", "closeMessageCursor",
+                  "openPreparedData", "getPreparedSelection", "getMessageByLocator", "openMessageCursorAround", "getCachedImageKeys",
                   "getSessionMessageTypeStats", "searchMessages", "setMonitor", "cancel"}
         if method in simple:
             return getattr(self, method)(**payload)

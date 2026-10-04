@@ -10,6 +10,7 @@ import { wcdbService } from './wcdbService'
 import { decryptDatViaNativeAsync, nativeAddonLocation } from './nativeImageDecrypt'
 import { KeyProviderService } from './keyProviderService'
 import { heicToJpeg, isHeic } from './heicDecoder'
+import { datVersion, decryptDatV3, decryptDatV4 } from '../../shared/chat/imageDecrypt'
 
 // 获取 ffmpeg-static 的路径
 function getStaticFfmpegPath(): string | null {
@@ -2287,63 +2288,15 @@ export class ImageDecryptService {
   }
 
   private decryptDatV3WithJs(data: Buffer, xorKey: number): Buffer {
-    const output = Buffer.allocUnsafe(data.length)
-    for (let i = 0; i < data.length; i += 1) {
-      output[i] = data[i] ^ xorKey
-    }
-    return output
+    return decryptDatV3(data, xorKey)
   }
 
   private decryptDatV4WithJs(data: Buffer, xorKey: number, aesKey: Buffer): Buffer {
-    if (data.length < 0x0f) {
-      throw new Error('dat file too small')
-    }
-    const header = data.subarray(0, 0x0f)
-    const payload = data.subarray(0x0f)
-    const aesSize = this.readInt32LeSafe(header, 6)
-    const xorSize = this.readInt32LeSafe(header, 10)
-    if (aesSize < 0) throw new Error('invalid aes size')
-    const remainder = ((aesSize % 16) + 16) % 16
-    const alignedAesSize = aesSize + (16 - remainder)
-    if (alignedAesSize > payload.length) throw new Error('invalid aes size')
-
-    const aesData = payload.subarray(0, alignedAesSize)
-
-    let plainAes: Buffer = Buffer.alloc(0)
-    if (aesData.length > 0) {
-      const decipher = crypto.createDecipheriv('aes-128-ecb', aesKey, Buffer.alloc(0))
-      decipher.setAutoPadding(false)
-      plainAes = this.strictRemovePkcs7Padding(Buffer.concat([decipher.update(aesData), decipher.final()]))
-      if (plainAes.length !== aesSize) throw new Error('invalid aes plaintext size')
-    }
-
-    const remaining = payload.subarray(alignedAesSize)
-    if (xorSize < 0 || xorSize > remaining.length) throw new Error('invalid xor size')
-
-    let rawData: Buffer = Buffer.alloc(0)
-    let decodedXor: Buffer = Buffer.alloc(0)
-    if (xorSize > 0) {
-      const rawLength = remaining.length - xorSize
-      if (rawLength < 0) throw new Error('invalid raw size')
-      rawData = remaining.subarray(0, rawLength)
-      const xorData = remaining.subarray(rawLength)
-      decodedXor = Buffer.allocUnsafe(xorData.length)
-      for (let i = 0; i < xorData.length; i += 1) {
-        decodedXor[i] = xorData[i] ^ xorKey
-      }
-    } else {
-      rawData = remaining
-    }
-    return Buffer.concat([plainAes, rawData, decodedXor])
+    return decryptDatV4(data, xorKey, aesKey)
   }
 
   private getDatVersion(data: Buffer): number {
-    if (data.length < 6) return 0
-    const sigV1 = Buffer.from([0x07, 0x08, 0x56, 0x31, 0x08, 0x07])
-    const sigV2 = Buffer.from([0x07, 0x08, 0x56, 0x32, 0x08, 0x07])
-    if (data.subarray(0, 6).equals(sigV1)) return 1
-    if (data.subarray(0, 6).equals(sigV2)) return 2
-    return 0
+    return datVersion(data)
   }
 
   private readInt32LeSafe(buffer: Buffer, offset: number): number {

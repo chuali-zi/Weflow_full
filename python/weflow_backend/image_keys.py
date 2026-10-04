@@ -95,6 +95,28 @@ def validated(key, probes):
         return False
 
 
+def read_cached(account_dir, state):
+    """Read the existing DPAPI cache without walking attachments or processes."""
+    account_dir = Path(account_dir).resolve()
+    identity = os.path.normcase(str(account_dir))
+    cache = state.root / 'image-keys' / (hashlib.sha256(identity.encode()).hexdigest() + '.dpapi')
+    if not cache.is_file():
+        raise ToolError('IMAGE_KEY_REQUIRED', '尚无已验证的图片密钥缓存，请在 WeFlow 中准备图片密钥。')
+    try:
+        if cache.stat().st_size > 64 * 1024:
+            raise ValueError
+        saved = json.loads(state.unprotect(cache.read_bytes()))
+        aes_key = saved['aesKey']
+        xor_key = saved['xorKey']
+        if (saved.get('account_dir') != identity or not isinstance(aes_key, str) or
+                not re.fullmatch(r'[0-9a-fA-F]{16}', aes_key) or
+                not isinstance(xor_key, int) or not 0 <= xor_key <= 255):
+            raise ValueError
+    except (ValueError, KeyError, TypeError, UnicodeError, ToolError):
+        raise ToolError('IMAGE_KEY_REQUIRED', '图片密钥缓存无法验证，请在 WeFlow 中重新准备。') from None
+    return {'success': True, 'aesKey': aes_key, 'xorKey': xor_key, 'verified': True}
+
+
 def acquire(account_dir, state, source, progress=lambda message: None, refresh=False, timeout=60):
     account_dir = Path(account_dir).resolve()
     probes = samples(account_dir)

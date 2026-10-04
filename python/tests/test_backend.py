@@ -52,6 +52,33 @@ class QueryTests(unittest.TestCase):
         with self.assertRaises(ToolError):
             self.backend.fetchMessageBatch(cursor)
 
+    def test_locator_and_after_position_are_exact(self):
+        rows = list(self.backend.message_stream('wxid_peer', ascending=True))
+        locator = {"relativeDb": rows[1]["_relative_db"], "table": rows[1]["_table_name"],
+                   "localId": rows[1]["local_id"], "createTime": rows[1]["create_time"]}
+        found = self.backend.getMessageByLocator('wxid_peer', locator)['message']
+        self.assertEqual(found['local_id'], rows[1]['local_id'])
+        self.assertEqual(found['_relative_db'], rows[1]['_relative_db'])
+        opened = self.backend.openMessageCursor('wxid_peer', batchSize=2, ascending=True,
+            afterPosition=[rows[1]['create_time'], rows[1]['sort_seq'], rows[1]['local_id'], rows[1]['_relative_db']])
+        page = self.backend.fetchMessageBatch(opened['cursor'])
+        self.assertEqual(page['rows'][0]['local_id'], rows[2]['local_id'])
+        around = self.backend.openMessageCursorAround('wxid_peer', locator, 'asc', 2)
+        self.assertEqual(self.backend.fetchMessageBatch(around['cursor'])['rows'][0]['local_id'], rows[2]['local_id'])
+
+    def test_open_prepared_snapshot_never_creates_copy_or_saves_selection(self):
+        result = self.backend.openPreparedData(dataDir=str(self.root), mode='snapshot')
+        self.assertEqual(result['mode'], 'snapshot')
+        self.assertEqual(result['capturedAt'], '2026-10-02T12:00:00+00:00')
+        before = self.backend.state.settings()
+        self.backend.close()
+        active = self.backend.active_path(self.root)
+        active.unlink()
+        with self.assertRaises(ToolError) as error:
+            self.backend.openPreparedData(dataDir=str(self.root), mode='snapshot')
+        self.assertEqual(error.exception.code, 'SNAPSHOT_REQUIRED')
+        self.assertEqual(self.backend.state.settings(), before)
+
     def test_sessions_search_and_stats_contract(self):
         sessions = self.backend.getSessions()['sessions']
         self.assertEqual({s['username'] for s in sessions}, {'wxid_peer', '123@chatroom'})

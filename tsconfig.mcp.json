@@ -1,0 +1,7 @@
+{
+  "compilerOptions": {
+    "target": "ES2022", "lib": ["ES2022", "DOM"], "module": "ESNext", "moduleResolution": "bundler",
+    "types": ["node"], "strict": true, "skipLibCheck": true, "esModuleInterop": true, "noEmit": true
+  },
+  "include": ["mcp/**/*.ts", "shared/chat/**/*.ts", "shared/profileLock.ts", "vite.mcp.config.ts"]
+}

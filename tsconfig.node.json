@@ -23,6 +23,7 @@
     "src/utils/modelTokenLimits.ts",
     "src/utils/agentTokenEstimate.ts",
     "src/utils/agentConversationHistory.ts",
-    "shared/**/*.json"
+    "shared/**/*.json",
+    "shared/**/*.ts"
   ]
 }

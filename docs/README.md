@@ -8,6 +8,11 @@
 | --- | --- |
 | [Agent 首次启动与 CLI 排错](agent-first-start.md) | 从环境检查到打开 GUI 的实际操作顺序、错误恢复和日志位置。 |
 | [CLI 使用说明](cli.md) | 命令、参数、输出和退出码。 |
+| [MCP PRD 草案](mcp-prd.md) | 面向 Agent 的聊天读取需求、工具范围与两个主场景，设计依据。 |
+| [MCP 架构设计](mcp-architecture.md) | 独立 MCP 进程、现有后端复用、查询与媒体模块、运行和打包路线。 |
+| [MCP 实现规格](mcp-spec.md) | 7 个工具、参数/结果、标识与游标、覆盖/错误、后端扩展和验收要求。 |
+| [MCP 使用说明](mcp-usage.md) | 准备账号、客户端配置、调用顺序和开发验证命令。 |
+| [MCP 实现验证](mcp-validation.md) | 已执行的源码/Windows 包内联调、回归结果和验证边界。 |
 | [本地解密接入说明](integrated-backend.md) | 密钥认证、快照、原 WeFlow 接口接入位置、验证结果和当前能力范围。 |
 | [wxtext 架构](wxtext-architecture.md) | 密钥扫描、SQLCipher、WAL 与后端实现的技术说明。 |
 | [在线读取实验](online-read-experiment.md) | 微信运行时读取加密库的实测依据与验证边界。 |
@@ -26,6 +31,8 @@
 | 位置 | 职责 |
 | --- | --- |
 | `weflow.cmd` | Agent / 脚本入口；源码版准备环境，安装版使用冻结后端。 |
+| `weflow-mcp.cmd`、`mcp/` | stdio MCP 入口、7 个聊天读取工具、运行时和查询游标。 |
+| `shared/chat/` | GUI 与 MCP 共享的正文解码，以及 MCP 消息标识与归一化。 |
 | `启动 WeFlow.cmd` | 直接启动原 WeFlow GUI 的源码入口。 |
 | `python/weflow_backend/cli.py` | CLI 编排、结果与退出码；复用现有后端。 |
 | `python/weflow_backend/` | 账号发现、完整快照、只读聊天查询、原始 JSONL 导出与 RPC。 |

@@ -19,7 +19,7 @@ export class LocalBackendClient {
     progress?: (message: string) => void
   }>()
   private eventListeners = new Set<(event: LocalBackendEvent) => void>()
-  constructor(private stateDir: string, private resourcesPath = '') {}
+  constructor(private stateDir: string, private resourcesPath = '', private preferSource = false) {}
 
   onEvent(listener: (event: LocalBackendEvent) => void): () => void {
     this.eventListeners.add(listener)
@@ -36,7 +36,7 @@ export class LocalBackendClient {
       join(resources, '../backend', 'weflow-backend.exe'),
       join((process as NodeJS.Process & { resourcesPath?: string }).resourcesPath || resources, 'backend', 'weflow-backend.exe')]
       .find((candidate) => existsSync(candidate))
-    const frozen = Boolean(bundled)
+    const frozen = Boolean(bundled) && !this.preferSource
     const pythonCandidates = [process.env.WEFLOW_PYTHON,
       backendRoot && join(backendRoot, '../.venv/Scripts/python.exe'),
       backendRoot && join(backendRoot, '../.runtime/python/python.exe'),
@@ -88,19 +88,32 @@ export class LocalBackendClient {
     child.on('exit', (code) => fail(new Error(`内置后端已退出（${code ?? '中断'}），请重新打开记录。`)))
     child.stdin.on('error', () => {})
   }
-  call<T = any>(method: string, payload: Record<string, any> = {}, progress?: (message: string) => void, requestId?: number): Promise<T> {
+  call<T = any>(method: string, payload: Record<string, any> = {}, progress?: (message: string) => void, requestId?: number, options?: { timeoutMs?: number; signal?: AbortSignal }): Promise<T> {
+    if (options?.signal?.aborted) return Promise.reject(Object.assign(new Error('操作已取消。'), { code: 'CANCELLED' }))
     try { this.start() } catch (error) { return Promise.reject(error) }
     return new Promise<T>((resolvePromise, reject) => {
       const id = requestId ?? ++this.sequence
       if (id > this.sequence) this.sequence = id
+      const cleanup = () => options?.signal?.removeEventListener('abort', abort)
+      const abort = () => {
+        if (!this.pending.has(id)) return
+        this.cancel(id)
+        this.pending.delete(id)
+        clearTimeout(timer)
+        cleanup()
+        reject(Object.assign(new Error('操作已取消。'), { code: 'CANCELLED' }))
+      }
       const timer = setTimeout(() => {
         const entry = this.pending.get(id)
         if (!entry) return
         this.pending.delete(id)
-        entry.reject(new Error('记录处理超时，请重新尝试。'))
+        cleanup()
+        this.cancel(id)
+        entry.reject(Object.assign(new Error('记录处理超时，请重新尝试。'), { code: 'LIVE_READ_TIMEOUT' }))
         this.dispose()
-      }, 30 * 60_000)
-      this.pending.set(id, { resolve: resolvePromise, reject, timer, progress })
+      }, options?.timeoutMs ?? 30 * 60_000)
+      this.pending.set(id, { resolve: value => { cleanup(); resolvePromise(value) }, reject: error => { cleanup(); reject(error) }, timer, progress })
+      options?.signal?.addEventListener('abort', abort, { once: true })
       this.child!.stdin.write(`${JSON.stringify({ id, method, payload })}\n`)
     })
   }

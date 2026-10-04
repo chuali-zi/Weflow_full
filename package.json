@@ -16,8 +16,12 @@
   "scripts": {
     "start": "node scripts/start.cjs",
     "cli": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/cli.ps1",
+    "build:mcp": "npm run typecheck:mcp && node scripts/build-mcp.cjs",
+    "typecheck:mcp": "tsc --noEmit -p tsconfig.mcp.json",
+    "test:mcp": "node scripts/test-mcp.cjs",
+    "check:mcp": "node scripts/check-mcp.cjs",
     "build:app": "npm run typecheck && node scripts/clean-dist-electron.cjs && vite build",
-    "package:win": "node scripts/package-backend.cjs && npm run build:app && electron-builder --win --x64 --publish never",
+    "package:win": "node scripts/package-backend.cjs && npm run build:app && npm run build:mcp && electron-builder --win --x64 --publish never",
     "test:backend": "node scripts/test-backend.cjs",
     "check:desktop": "node scripts/check-desktop.cjs",
     "check:live": "node scripts/check-live-desktop.cjs",
@@ -28,13 +32,14 @@
     "typecheck:renderer": "tsc --noEmit -p tsconfig.json",
     "typecheck:electron": "tsc --noEmit -p tsconfig.node.json",
     "typecheck": "npm run typecheck:renderer && npm run typecheck:electron",
-    "build": "npm run typecheck && node scripts/clean-dist-electron.cjs && vite build && electron-builder",
+    "build": "npm run typecheck && node scripts/clean-dist-electron.cjs && vite build && npm run build:mcp && electron-builder",
     "preview": "vite preview",
     "electron:dev": "node scripts/prepare-electron-runtime.cjs && vite --mode electron",
     "electron:build": "npm run build"
   },
   "dependencies": {
     "@hicccc77/electron-liquid-glass": "^0.4.0",
+    "@modelcontextprotocol/sdk": "1.32.0",
     "@vscode/sudo-prompt": "^9.3.2",
     "electron-store": "^11.0.2",
     "electron-updater": "^6.8.9",
@@ -151,6 +156,10 @@
           "to": "weflow.cmd"
         },
         {
+          "from": "weflow-mcp.cmd",
+          "to": "weflow-mcp.cmd"
+        },
+        {
           "from": "resources/runtime/win32/msvcp140.dll",
           "to": "."
         },
@@ -206,6 +215,10 @@
       "uninstallerSidebar": null
     },
     "extraResources": [
+      {
+        "from": "build/mcp",
+        "to": "mcp"
+      },
       {
         "from": "build/backend/weflow-backend.exe",
         "to": "backend/weflow-backend.exe"

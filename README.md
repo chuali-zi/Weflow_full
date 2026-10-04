@@ -29,6 +29,12 @@ weflow.cmd prepare --mode live --data-dir "D:\wechat\xwechat_files\wxid_example\
 
 在线模式不要求退出微信。需要快照时使用 `prepare --mode snapshot --wait-exit 180 --launch`；命令只等待正常退出，**不会结束微信进程**。`decrypt` 始终生成快照。源码目录的 `weflow.cmd` 自动准备依赖并构建 GUI；安装目录的同名脚本使用包内后端。首次使用与错误恢复见 [Agent 首次启动指南](docs/agent-first-start.md)，模式、JSON 和退出码见 [CLI 使用说明](docs/cli.md)。
 
+## MCP（聊天读取）
+
+已准备的账号可以通过 `weflow-mcp.cmd` 提供给 Agent。首版包含 7 个工具：定位群聊/私聊、消息概览、原文分页、字面检索、上下文与引用、本机图片和连接状态。数据分析由调用方 Agent 完成。
+
+源码版运行 `npm run build:mcp`；安装版使用包内运行时。执行 `weflow-mcp.cmd --print-config --mode live` 可获得当前目录的客户端配置。准备账号、工具调用和读取限制见 [MCP 使用说明](docs/mcp-usage.md)。
+
 ## 接入范围
 
 | 能力 | 当前范围 |

@@ -4,6 +4,7 @@ import crypto from 'crypto'
 import Store from 'electron-store'
 import { expandHomePath } from '../utils/pathUtils'
 import { CacheMapStore } from './cacheMapStore'
+import { isProfileLocked } from '../../shared/profileLock'
 
 // 条件导入 electron（Worker 环境中不可用）
 let app: any = null
@@ -376,12 +377,7 @@ export class ConfigService {
   // === 状态查询 ===
 
   isLockMode(): boolean {
-    const raw: any = this.store.get('decryptKey')
-    if (typeof raw === 'string' && raw.startsWith(LOCK_PREFIX)) return true
-    const activeAiKey: any = this.store.get('aiModelApiKey')
-    if (typeof activeAiKey === 'string' && activeAiKey.startsWith(LOCK_PREFIX)) return true
-    const profiles: any = this.store.get('aiModelProfilesJson')
-    return typeof profiles === 'string' && profiles.startsWith(LOCK_PREFIX)
+    return isProfileLocked({ decryptKey: this.store.get('decryptKey'), aiModelApiKey: this.store.get('aiModelApiKey'), aiModelProfilesJson: this.store.get('aiModelProfilesJson') })
   }
 
   isUnlocked(): boolean {
