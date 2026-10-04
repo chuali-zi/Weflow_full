@@ -2,38 +2,21 @@
 
 基于 [hicccc77/WeFlow](https://github.com/hicccc77/WeFlow) 的本地解密接入分支。WeFlow 原有界面和操作流程保留；本分支把 wxtext 的微信数据库密钥获取、认证解密和只读查询接入现有流程。
 
-Windows 安装包使用现有构建入口，位于 `release` 目录，当前文件名为 `WeFlow-Local-5.0.0-Setup.exe`。安装后无需另装 Node.js 或 Python。源码用户可按下面步骤启动。
+## 安装
 
-## 使用
+安装指令：[installed.md](https://github.com/chuali-zi/Weflow_full/blob/main/installed.md)。把下面这段话复制给能操作本机终端的 Agent，让它完成 WeFlow 和 Codex MCP 的安装、配置与连接验证：
 
-1. Clone 或下载本仓库，在 Windows 上双击根目录的 **启动 WeFlow.cmd**。首次启动会在仓库内准备运行环境、安装依赖并构建，需要联网；后续启动复用已准备的环境。
-2. 在 WeFlow 原有欢迎/数据库设置界面，选择或填写微信数据目录根路径。登录电脑微信后，点击原有的 **自动获取密钥** 按钮。
-3. 如果同一个微信账号有多套数据目录，密钥会按各数据库首页认证。唯一匹配的目录会自动填回原有路径栏；无法唯一判断时，按原有错误提示选择正确路径。
-4. 在欢迎页或数据库设置页选择**在线读取**，然后连接数据库。微信可以保持运行，新提交的聊天记录会自动刷新会话列表和聊天窗口。如果选择**离线副本**，首次准备或更新副本时需要从系统托盘正常退出微信，再连接数据库。
-
-在线模式使用 SQLCipher 只读连接，由数据库引擎处理加密页面和 WAL；无需反复复制或整库解密。离线副本是固定快照，可用于稳定的大范围导出；更新副本仍需要退出微信。没有保存读取模式的旧配置默认使用离线副本，成功选择后按账号保存。
-
-## CLI（Agent / 脚本）
-
-一条命令获取密钥、验证在线连接、配置现有 WeFlow，然后打开 GUI：
-
-```bat
-weflow.cmd prepare --mode live --launch
+```text
+请阅读并执行 https://github.com/chuali-zi/Weflow_full/blob/main/installed.md ，帮我在本机安装 WeFlow，并将它的 MCP 接入 Codex。复用已有安装和配置，默认使用 live 模式，完成后验证 CLI 与 MCP 的实际连接。需要我登录微信或选择账号时再告诉我。
 ```
 
-有多个微信数据目录时明确指定目标：
-
-```bat
-weflow.cmd prepare --mode live --data-dir "D:\wechat\xwechat_files\wxid_example\db_storage" --launch
-```
-
-在线模式不要求退出微信。需要快照时使用 `prepare --mode snapshot --wait-exit 180 --launch`；命令只等待正常退出，**不会结束微信进程**。`decrypt` 始终生成快照。源码目录的 `weflow.cmd` 自动准备依赖并构建 GUI；安装目录的同名脚本使用包内后端。首次使用与错误恢复见 [Agent 首次启动指南](docs/agent-first-start.md)，模式、JSON 和退出码见 [CLI 使用说明](docs/cli.md)。
+详细的环境准备、常见报错、复杂 CLI 用法和 MCP 注册步骤均在该文件中。
 
 ## MCP（聊天读取）
 
 已准备的账号可以通过 `weflow-mcp.cmd` 提供给 Agent。首版包含 7 个工具：定位群聊/私聊、消息概览、原文分页、字面检索、上下文与引用、本机图片和连接状态。数据分析由调用方 Agent 完成。
 
-源码版运行 `npm run build:mcp`；安装版使用包内运行时。执行 `weflow-mcp.cmd --print-config --mode live` 可获得当前目录的客户端配置。准备账号、工具调用和读取限制见 [MCP 使用说明](docs/mcp-usage.md)。
+安装与客户端接入见 [installed.md](https://github.com/chuali-zi/Weflow_full/blob/main/installed.md)；工具调用和读取限制见 [MCP 使用说明](docs/mcp-usage.md)。CLI 的完整命令、JSON 输出和退出码见 [CLI 使用说明](docs/cli.md)。
 
 ## 接入范围
 
@@ -69,13 +52,7 @@ weflow.cmd prepare --mode live --data-dir "D:\wechat\xwechat_files\wxid_example\
 
 ## 开发与打包
 
-更多文档见[文档导航](docs/README.md)。只准备运行环境：
-
-```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File scripts\launch.ps1 -SetupOnly
-```
-
-源码检查与构建：
+开发环境准备见 [installed.md](https://github.com/chuali-zi/Weflow_full/blob/main/installed.md)，更多文档见[文档导航](docs/README.md)。源码检查与构建：
 
 ```powershell
 npm run typecheck

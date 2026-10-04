@@ -1,11 +1,12 @@
 # 文档与仓库导航
 
-首次使用从 [Agent 首次启动与 CLI 排错](agent-first-start.md) 开始。完整命令参数、JSON 输出约定和退出码见 [CLI 使用说明](cli.md)。手动操作 GUI 的流程见仓库根目录 [README](../README.md)。
+首次安装把根目录 [installed.md](../installed.md) 的地址或全文交给 Agent 执行。首次启动和恢复细节见 [Agent 首次启动与 CLI 排错](agent-first-start.md)，完整命令参数、JSON 输出约定和退出码见 [CLI 使用说明](cli.md)。
 
 ## 文档
 
 | 文档 | 用途 |
 | --- | --- |
+| [Agent 自动安装指令](../installed.md) | 可直接交给 Agent 的安装任务，包含源码/安装版选择、Codex MCP 注册、连接验证、常见错误和复杂 CLI 示例。 |
 | [Agent 首次启动与 CLI 排错](agent-first-start.md) | 从环境检查到打开 GUI 的实际操作顺序、错误恢复和日志位置。 |
 | [CLI 使用说明](cli.md) | 命令、参数、输出和退出码。 |
 | [MCP PRD 草案](mcp-prd.md) | 面向 Agent 的聊天读取需求、工具范围与两个主场景，设计依据。 |
