@@ -1,6 +1,6 @@
 # 给 Agent 的 WeFlow 安装指令
 
-把本文件的地址或全文交给能够操作本机终端的 Agent，即可作为安装任务的提示词。本文件面向 **Windows x64**，涵盖 WeFlow 桌面应用、CLI 和本地 stdio MCP；默认使用 `live` 读取，并把 MCP 注册到 Codex。用户明确指定其他客户端、账号、目录或 `snapshot` 时，以用户的选择为准。
+把本文件的地址或全文交给能够操作本机终端的 Agent，即可作为安装任务的提示词。本文件面向 **Windows x64**，涵盖 WeFlow 桌面应用、CLI 和本地 stdio MCP。支持本地 stdio MCP 的智能体和客户端均可接入；默认使用 `live` 读取，并注册到用户实际使用的客户端。用户明确指定客户端、账号、目录或 `snapshot` 时，以用户的选择为准。
 
 仓库：https://github.com/chuali-zi/Weflow_full
 
@@ -10,9 +10,9 @@
 
 ## 你的任务
 
-请检查本机环境，安装或复用 WeFlow，准备用户的微信账号，把聊天读取 MCP 接入 Codex，并验证实际连接。执行已授权的依赖下载、构建和客户端配置，不要只返回一份教程。已有安装、已认证密钥和可用配置应优先复用。
+请检查本机环境，安装或复用 WeFlow，准备用户的微信账号，把聊天读取 MCP 接入用户使用的智能体或 MCP 客户端，并验证实际连接。执行已授权的依赖下载、构建和客户端配置，不要只返回一份教程。已有安装、已认证密钥和可用配置应优先复用。
 
-安装完成的判断是：CLI 能验证所选账号，Codex 配置指向真实存在的入口，MCP 客户端能列出 8 个工具（包含 `export_messages`），且 `get_status` 能确认账号和读取模式。配置写入成功与实际连接成功要分别报告。
+安装完成的判断是：CLI 能验证所选账号，目标客户端的配置指向真实存在的入口，MCP 客户端能列出 8 个工具（包含 `export_messages`），且 `get_status` 能确认账号和读取模式。配置写入成功与实际连接成功要分别报告。
 
 只有需要用户操作时才暂停，例如登录微信、在多个账号中选择目标、正常退出仍占用配置的应用、处理应用锁或用户协议。不要猜测账号，不要结束微信进程，不要覆盖仓库里的未提交修改。安装验收读取状态即可；聊天分析、批量读取和导出等后面的示例，在用户提出对应任务时执行。
 
@@ -100,7 +100,9 @@ if ($LASTEXITCODE -ne 0) { throw '账号验证失败。' }
 
 需要同时打开桌面应用时，在 `prepare` 后加 `--launch`，或执行 `launch`。新 profile 可能显示用户协议，需要用户在 GUI 中处理。`prepare` / `configure` / `launch` 会将该 profile 的密钥提供程序和 WCDB 切换到内置后端；用户需要保留另一个 profile 的外部工具设置时，使用独立 profile，例如 `%APPDATA%\WeFlow-agent`，并先为它执行同样的准备流程。
 
-## 4. 生成配置并注册到 Codex
+## 4. 生成配置并接入 MCP 客户端
+
+优先使用用户明确指定的智能体或客户端；未指定时，先检查当前智能体的 MCP 接入方式和本机已有客户端。按客户端实际支持的 CLI、设置界面或配置文件完成注册。客户端的配置格式与位置可能不同，使用其本机帮助或官方文档确认；只有无法判断目标客户端时，才让用户选择。
 
 先通过实际入口生成绝对路径配置：
 
@@ -113,7 +115,7 @@ $weflowConfig = ($weflowConfigText | Out-String | ConvertFrom-Json).mcpServers.w
 
 需要特定日期桶时区时，可在 `$weflowMcpArgs` 中追加 `@('--timezone', 'Asia/Shanghai')`；未指定时使用系统 IANA 时区。不要把该时区示例当成本机默认值。
 
-源码版还可以显式固定项目 Python 路径，避免 Codex 的启动环境与终端不同：
+源码版还可以显式固定项目 Python 路径，避免客户端的启动环境与终端不同：
 
 ```powershell
 # 仅在源码目录执行；应用安装版不设置 WEFLOW_PYTHON。
@@ -127,46 +129,40 @@ $weflowConfig.env | Add-Member -NotePropertyName WEFLOW_PYTHON -NotePropertyValu
 
 使用 `weflow-mcp.cmd --print-config`，不要绕过入口直接对 `server.cjs` 生成配置；入口会提供源码/安装版需要的环境。保留输出中的 `command`、完整 `args` 和全部 `env`，包括 `ELECTRON_RUN_AS_NODE`、`WEFLOW_MCP_ASSETS`、`WEFLOW_BACKEND_ROOT`，以及安装版的 `NODE_PATH`。路径含空格或中文时，仍按独立参数传递。
 
-寻找本机 Codex CLI：优先使用 PATH 中的 CLI；Codex 桌面版的内置 CLI 也可使用。
+检查目标客户端已有的 MCP 服务。相同安装的 `weflow` 配置可以更新；同名但指向另一个用户仍在使用的安装时，保留它并选择 `weflow-local` 等未占用名称。修改配置文件前保留原文件，合并本次服务配置，保留其他服务、模型和权限设置。
 
-```powershell
-$weflowCodexCommand = Get-Command codex.cmd, codex.exe -ErrorAction SilentlyContinue | Select-Object -First 1
-$weflowCodex = if ($weflowCodexCommand) { $weflowCodexCommand.Source } else { $null }
-if (-not $weflowCodex) {
-    $weflowCodexBin = Join-Path $env:LOCALAPPDATA 'OpenAI\Codex\bin'
-    if (Test-Path -LiteralPath $weflowCodexBin) {
-        $weflowCodex = Get-ChildItem -LiteralPath $weflowCodexBin -Recurse -File -Filter codex.exe |
-            Sort-Object LastWriteTimeUtc -Descending | Select-Object -First 1 -ExpandProperty FullName
-    }
-}
-if (-not $weflowCodex) { throw '未找到 Codex CLI，请确认用户安装的客户端及其实际位置。' }
-& $weflowCodex mcp add --help
-& $weflowCodex mcp list
-```
+根据客户端提供的接入方式执行：
 
-检查已有 `weflow` 配置。相同安装的配置可以更新；同名但指向另一个用户仍在使用的安装时，保留它并选择 `weflow-local` 等未占用名称。使用下面的参数数组注册，避免拼接命令字符串导致路径或转义错误：
+- **CLI 注册**：先查看该客户端的 MCP 添加、列出和查看命令的帮助。将生成的 `command`、`args`、`env` 按其参数格式传入；使用参数数组，避免拼接命令字符串造成路径或转义错误。
+- **设置界面**：添加本地 MCP 服务，名称使用 `weflow` 或选定的未占用名称，传输方式选择 `stdio`，分别填写启动命令、完整参数和环境变量。
+- **配置文件**：找到客户端实际使用的用户级或项目级 MCP 配置，按其 JSON、TOML 或其他格式合并服务条目。根字段、服务名称层级及是否需要显式 `type: "stdio"` 以该客户端的格式为准。
+
+核心字段的含义一致：
+
+| 字段 | 配置内容 |
+| --- | --- |
+| 服务名称 | `weflow`，或选定的未占用名称。 |
+| 传输方式 | 本地 `stdio`，由客户端启动并管理服务进程。 |
+| `command` | `$weflowConfig.command` 中的可执行文件绝对路径。 |
+| `args` | `$weflowConfig.args` 中的完整参数列表，保持顺序和各参数边界。 |
+| `env` | `$weflowConfig.env` 中的全部环境变量，包含源码版补充的 Python 路径。 |
+
+使用 `mcpServers` 根字段的 JSON 客户端可以合并以下命令生成的配置片段；其他格式按上表转换：
 
 ```powershell
 $weflowServerName = 'weflow' # 如已有其他安装占用此名称，换用未占用名称。
-$weflowCodexArgs = @('mcp', 'add', $weflowServerName)
-foreach ($entry in $weflowConfig.env.PSObject.Properties) {
-    $weflowCodexArgs += @('--env', "$($entry.Name)=$($entry.Value)")
-}
-$weflowCodexArgs += @('--', $weflowConfig.command)
-$weflowCodexArgs += @($weflowConfig.args)
-& $weflowCodex @weflowCodexArgs
-if ($LASTEXITCODE -ne 0) { throw 'Codex MCP 注册失败。' }
-& $weflowCodex mcp get $weflowServerName --json
-& $weflowCodex mcp list
+$weflowClientConfig = @{ mcpServers = @{} }
+$weflowClientConfig.mcpServers[$weflowServerName] = $weflowConfig
+$weflowClientConfig | ConvertTo-Json -Depth 10
 ```
 
-Codex 的用户级配置默认在 `~/.codex/config.toml`；设置了 `CODEX_HOME` 时使用其对应目录。优先使用 CLI 更新 MCP，保留其他服务、模型和权限设置。这里注册的是本地 **stdio** 服务，不需要 URL、开放端口、OAuth 或另配模型 API Key。Codex 命令说明见 [OpenAI 官方 MCP 文档](https://developers.openai.com/learn/docs-mcp)。
+生成配置片段后，继续将它合并到目标客户端或完成 CLI/界面注册，并检查服务是否启用。客户端允许设置工具超时时，大范围导出可设为 300 秒；支持响应大小设置时，按 Agent 的上下文和任务调整，避免客户端截断大批量读取结果。
 
-其他支持 MCP 的客户端可将 `--print-config` 输出中的 `mcpServers.weflow` 按该客户端的配置格式导入。不要把 `mcpServers` JSON 直接粘进 Codex 的 TOML 文件。切换到 snapshot 时，应先准备快照，再重新生成带 `--mode snapshot` 的客户端配置。
+这里接入的是本地 **stdio** 服务，运行在微信数据所在的电脑。远程智能体可通过客户端已有的本地 MCP 连接器访问；仅接受 HTTP 服务且没有本地连接能力的客户端，需要先具备相应连接能力。`--print-config` 不会生成 HTTP 服务地址。切换到 snapshot 时，应先准备快照，再重新生成带 `--mode snapshot` 的客户端配置。
 
 ## 5. 验证真实连接并交付
 
-`codex mcp get` 只能证明已注册，不能证明账号可读。让 MCP 客户端列出工具并调用 `get_status {}`，核对账号、mode、连接状态和数据时间。预期工具为：
+客户端的配置查看或服务列表只能证明已注册，不能证明账号可读。让 MCP 客户端实际连接、列出工具并调用 `get_status {}`，核对账号、mode、连接状态和数据时间。预期工具为：
 
 ```text
 get_status
@@ -179,11 +175,11 @@ get_media
 export_messages
 ```
 
-如果当前 Codex 会话尚未加载新 MCP，打开新会话；仍未加载时重新启动客户端。在支持重新加载 MCP 的客户端中也可使用其重新加载功能。不要把当前会话缺少工具判断成服务端构建失败，也不要只凭注册成功宣称连接验收已完成。
+注册后按目标客户端的方式重新加载 MCP；需要新会话或重启才能生效的客户端，执行相应步骤。如果用独立 MCP 客户端完成连接验证，还要分别说明目标智能体是否已加载工具。不要把当前会话缺少工具判断成服务端构建失败，也不要只凭注册成功宣称连接验收已完成。
 
 直接在终端运行 `weflow-mcp.cmd` 后等待输入是正常现象：它是持续运行的 stdio 服务，由 MCP 客户端完成协议握手和工具调用。`--print-config` 仅用于生成配置，不能留在已注册服务的启动参数中。
 
-最后向用户简短报告：安装目录、使用的 profile 与账号、读取模式、MCP 名称、CLI 验证结果、工具列表与 `get_status` 的实际验证结果。如需用户登录或新开会话，说明哪个步骤尚未完成及下一步操作。不要输出原始密钥或聊天正文。
+最后向用户简短报告：安装目录、使用的 profile 与账号、读取模式、目标智能体或客户端、MCP 名称与配置位置、CLI 验证结果、工具列表与 `get_status` 的实际验证结果。如需用户登录、重新加载或新开会话，说明哪个步骤尚未完成及下一步操作。不要输出原始密钥或聊天正文。
 
 ## 常见报错与恢复
 
@@ -207,7 +203,8 @@ export_messages
 | `GUI_NOT_BUILT`（17） | 源码版使用启动脚本 `-BuildOnly` 构建；已有安装可用 `--app '完整路径\WeFlow.exe'` 指定应用。 |
 | `PROFILE_NOT_PREPARED` / `PROFILE_CONFIG_INVALID` | 检查 MCP 的 `--user-data` 是否指向执行过 `prepare` 的 profile。配置损坏时保留原文件，恢复有效配置或另建 profile；不要随手删除整个目录。 |
 | MCP 启动即退出 / 连接关闭 / 协议解析失败 | 检查生成配置中的入口、args 和 env 是否完整，源码 Python 是否存在；启动参数不能包含 `--print-config`。stdout 只用于 MCP 协议，诊断信息看 stderr。 |
-| 注册后 Codex 仍看不到工具 | 核对 `mcp get NAME --json` 中的 enabled、command、args、env，再新开会话或重启客户端。 |
+| 注册后智能体仍看不到工具 | 检查目标客户端实际加载的配置位置、服务启用状态、command、args 和 env，按客户端方式重新加载 MCP、新开会话或重启。 |
+| 客户端只接受 HTTP MCP 服务地址 | 确认是否提供本地 stdio MCP 连接器。WeFlow 当前入口是本地 stdio 服务；报告接入限制，不把本机文件路径当作 HTTP 地址。 |
 | `LIVE_BUSY`（19） / `LIVE_READ_TIMEOUT`（20） | 短暂繁忙可稍后重试一次；超时则缩小查询。大范围导出可改用固定 snapshot，不要无限重试相同请求。 |
 | `SOURCE_REPLACED`（21） | 源数据库可能切换或替换，重新验证账号连接；提示需要密钥时再获取。 |
 | `CURSOR_STALE` / `CURSOR_EXPIRED` | 按原条件重新查询并建立新游标。live 变化或游标到期时，不要继续重复旧游标。 |

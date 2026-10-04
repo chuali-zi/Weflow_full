@@ -4,10 +4,10 @@
 
 ## 安装
 
-安装指令：[installed.md](https://github.com/chuali-zi/Weflow_full/blob/main/installed.md)。把下面这段话复制给能操作本机终端的 Agent，让它完成 WeFlow 和 Codex MCP 的安装、配置与连接验证：
+安装指令：[installed.md](https://github.com/chuali-zi/Weflow_full/blob/main/installed.md)。把下面这段话复制给能操作本机终端的 Agent，让它完成 WeFlow 安装，并接入用户使用的 MCP 智能体或客户端：
 
 ```text
-请阅读并执行 https://github.com/chuali-zi/Weflow_full/blob/main/installed.md ，帮我在本机安装 WeFlow，并将它的 MCP 接入 Codex。复用已有安装和配置，默认使用 live 模式，完成后验证 CLI 与 MCP 的实际连接。需要我登录微信或选择账号时再告诉我。
+请阅读并执行 https://github.com/chuali-zi/Weflow_full/blob/main/installed.md ，帮我在本机安装 WeFlow，并将它的 MCP 接入我使用的智能体或 MCP 客户端。复用已有安装和配置，默认使用 live 模式，完成后验证 CLI 与 MCP 的实际连接。需要我登录微信或选择账号时再告诉我。
 ```
 
 详细的环境准备、常见报错、复杂 CLI 用法和 MCP 注册步骤均在该文件中。
