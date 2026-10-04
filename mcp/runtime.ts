@@ -123,7 +123,7 @@ export class McpRuntime {
       const state = await this.call<any>('getConnectionStatus', {}, signal)
       return { schema_version: '1', success: true, account: { id: connection.accountScope, self_id: personId(connection.accountScope, connection.accountId) }, timezone: this.timezone,
         data: { state: state.state, configured_account: connection.accountScope, self: personId(connection.accountScope, connection.accountId), mode_selection_source: this.modeSource,
-          capabilities: { text: true, quotes: true, local_images: 'on_demand', live: connection.mode === 'live', complete_group_members: false, voice_transcription: false, ocr: false }, recovery_actions: [] },
+          capabilities: { text: true, quotes: true, compact_messages: true, message_export: 'local_files', local_images: 'on_demand', live: connection.mode === 'live', complete_group_members: false, voice_transcription: false, ocr: false }, recovery_actions: [] },
         coverage: null, freshness, warnings: [], error: null }
     } catch (caught) {
       const error = caught as Error & { code?: string; action?: string }

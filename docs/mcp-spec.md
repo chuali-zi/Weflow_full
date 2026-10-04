@@ -2,7 +2,7 @@
 
 状态：v1 实现契约。运行和验证见 [使用说明](mcp-usage.md)。日期：2026 年 10 月 3 日。规格版本：v1。代码基线：`170c4a9`。
 
-依据：[PRD](mcp-prd.md)、[架构设计](mcp-architecture.md)。本文的 MUST/必须是实现与验收要求，不代表已完成。首版交付固定 7 个工具、stdio 本机服务、现有 live/snapshot 数据源、可恢复分页和可解释的覆盖信息。
+依据：[PRD](mcp-prd.md)、[架构设计](mcp-architecture.md)。本文的 MUST/必须是实现与验收要求，不代表已完成。当前交付 8 个工具、stdio 本机服务、现有 live/snapshot 数据源、可恢复分页、大块原文读取和完整范围文件导出。
 
 ## 1 启动与配置
 
@@ -43,7 +43,7 @@ profile 锁配置使用现有 `WeFlow-config.json` 格式，复用 `isLockMode` 
 
 返回消息时间统一 RFC3339 UTC 字符串，响应提供业务 IANA timezone；日期桶按该 timezone 计算，处理 DST。不要复用按 Python 主机默认时区产生的 daily 计数作为任意时区结果。
 
-预算统一：`limit` 1～200，`max_chars` 1,000～40,000，默认 12,000，find_chats 的条数上限另见工具表。字符以 Unicode code point 计，不在代理对中间切段；这不是 token 估算器。预算覆盖规范 JSON 文本（含名称映射、正文与 coverage）；二进制媒体使用独立大小预算。保留元数据空间后分配正文，超限不得删掉 coverage；必要元数据已超出调用方预算时返回 OUTPUT_BUDGET_TOO_SMALL 与所需最小预算。
+`read_messages` 的 `limit` 为 1～10,000，默认 500；`max_chars` 为 1,000～2,000,000，默认 120,000。Agent 自行选择预算与 normalized/compact 格式。其他分页工具仍使用 1,000～40,000 字符、默认 12,000；search 的 limit 仍为 1～200、默认 20，find_chats 的条数上限另见工具表。字符以 Unicode code point 计，不在代理对中间切段；这不是 token 估算器。预算覆盖规范 JSON 文本（含名称映射、正文与 coverage）；二进制媒体使用独立大小预算。保留元数据空间后分配正文，超限不得删掉 coverage；必要元数据已超出调用方预算时返回 OUTPUT_BUDGET_TOO_SMALL。
 
 默认最多 5 个 chat IDs、10 个上下文 message IDs。配置与错误返回不接受任意文件路径/SQL。后端源文件路径只通过服务内部数据发现确定。
 
@@ -56,10 +56,11 @@ profile 锁配置使用现有 `WeFlow-config.json` 格式，复用 `isLockMode` 
 | `get_status` | `{}` | 返回配置状态和最低限度能力，无自动准备 |
 | `find_chats` | `query?: string`、`kind?: private|group|all`、`active_since?: timestamp`、`limit?`、`cursor?` | query 空值按最近活动浏览；默认 10 条，最多 50；仅 private/group，可无消息联系人作为明确候选 |
 | `get_chat_overview` | `chat_ids`、`range`、`bucket?: day|week`、`max_chars?`、`cursor?` | 默认 day；超时或桶结果超预算时支持续读，计数标明累计与完成状态 |
-| `read_messages` | `chat_ids`、`range?`、`after_message?: string`、`sender_ids?`、`types?`、`direction?: asc|desc`、`limit?`、`max_chars?`、`cursor?` | 默认最近 24 小时、asc、50 条；after_message 与 range 互斥且只用于单会话，从完整排序锚点严格向后读到固定 now |
+| `read_messages` | `chat_ids`、`range?`、`after_message?: string`、`sender_ids?`、`types?`、`direction?: asc|desc`、`format?: normalized|compact`、`limit?`、`max_chars?`、`cursor?` | 默认最近 24 小时、asc、normalized、500 条/120,000 字符；after_message 与 range 互斥且只用于单会话，从完整排序锚点严格向后读到固定 now |
 | `search_messages` | `query: {terms: string[], operator?: any|all, fields?: SearchField[]}`、`chat_ids?`、`range`、`sender_ids?`、`mentions?: self|all|person_id`、`types?`、`limit?`、`max_chars?`、`cursor?` | terms 1～8 个非空字符串，默认 any、20 命中；chat_ids 未给时搜索本账号实际有消息的群聊/私聊 |
 | `get_message_context` | `message_ids`、`before?`、`after?`、`include_replies?`、`reply_range?`、`format?: normalized|raw`、`max_chars?`、`cursor?` | 默认 before=5、after=10、include_replies=true；before/after 各 0～50；raw 仅按已知 ID取原格式，无全库导出 |
 | `get_media` | `message_id`、`representation?: metadata|image|text`、`quality?: preview|original` | 默认 metadata；图片请求显式 representation=image；text 只返回已可验证的转写/解析结果 |
+| `export_messages` | `chat_ids`、`range`、`sender_ids?`、`types?`、`direction?: asc|desc`、`output_dir?: absolute path` | 连续导出完整范围；返回服务端本机 JSONL/TXT/manifest 路径，无单页条数或字符预算 |
 
 `types` 使用固定枚举 text、image、voice、video、file、link、quote、forwarded、location、system、other。`sender_ids` 与 mentions 的 person_id 使用工具返回的稳定身份，不能用展示昵称代替。
 
@@ -124,10 +125,15 @@ type Coverage = {
 | get_status | state、configured_account、self、mode_selection_source、capabilities、recovery_actions；不含密钥/绝对源路径 |
 | find_chats | chats；每项 id、kind、display_name、remark/alias、match_basis、last_activity、has_local_messages；不返回完整成员名单 |
 | get_chat_overview | chats；每群/人有 requested range、total、sent、received、unknown_sender、type_counts、buckets、local_history_bounds、counts_complete |
-| read_messages | chats 名称映射、people 身份映射、messages |
+| read_messages | chats 名称映射、people 身份映射、messages；compact 模式另有 format、message_columns、message_defaults |
 | search_messages | 名称映射、hits；每项 message_id、chat_id、sender_id、sent_at、type、snippets、matched_fields/terms、context_anchor；match_mode=literal；total_hits 可为 null |
 | get_message_context | 名称映射、messages、anchors、windows、unresolved_quotes、reply_search_scope、reply_search_complete；重叠窗口合并 |
 | get_media | message_id、kind、availability、representation、mime_type、width/height、quality、transformed、source=local、reason、recovery_action；图片内容在 MCP image block |
+| export_messages | status、output_dir、message_count、files（绝对路径、URI、MIME、字节数）、chats、people_count；完整名称映射写入 manifest |
+
+compact 模式每条消息为 `[id, chat_ref, sender_ref, sent_at, type, text, details]`，列名和 details 缺省值在响应中统一声明。chat_ref/sender_ref 为本页 C1/P1 等短引用，chats/people 映射保留完整稳定 id 和名称，短引用不跨页复用。消息自身的稳定 ID、正文、引用、真实 @、附件状态和长文本偏移保留，减少重复字段名、会话/参与者 ID 与空值，不摘要或抽样。normalized 继续返回原消息对象。
+
+export_messages 复用归一化与有序扫描，以 1,000 条为一批直接写入独立输出子目录，不使用响应拆段和游标重放缓存。JSONL 保留完整消息对象，TXT 提供可读原文，manifest 记录状态、范围、条数、名称和 freshness/coverage。默认目录是所选 profile 的 mcp-exports；可指定绝对 output_dir。支持 progress 通知和取消，取消/失败时保留部分文件并标为未完成。导出完成只表示记录已取得，读取与分析由 Agent 决定；文件路径和 resource links 需要客户端能访问服务端本机文件。
 
 概览续读返回本次查询的累计计数，`counts_complete` 与 coverage.scan_complete 同步；客户端按累计值替换，不能对重复续读再累加。日期桶超输出预算时仍需排页，并分清 counts_complete 与 has_more。
 
@@ -175,7 +181,7 @@ normalized 格式保留原文措辞、否定、日期、数字、姓名与链接
 
 续读原 token 必须可重放：同版本内重复调用返回同一页及同一个 next_cursor，不二次推进 Python 可变游标。第一次生成续页后缓存这页结果；分页仍有后续状态的记录不可单独被驱逐造成隐式跳页，回收要以整个查询为单位。版本变化时重放也返回 CURSOR_STALE，不假称当前数据仍一致。
 
-每次原始 fetch 建议最多 100 条。批次已从 Python 取回但正文预算装不下的尾部保存在 pending；下次先输出 pending，不能直接拉新批次覆盖它。读完原始游标但 pending 或长文本还没输出时，scan_complete 可为 true，has_more 仍为 true。
+原文阅读按请求条数选择 100～1,000 条后端批次，文件导出使用 1,000 条批次。原文读取每页约 20 秒扫描工作时间，搜索和概览仍使用约 4.2 秒。多会话合并在输出前必须取得各未结束会话的头部，维持全局时间顺序。批次已从 Python 取回但正文预算装不下的尾部保存在 pending；下次先输出 pending，不能直接拉新批次覆盖它。读完原始游标但 pending 或长文本还没输出时，scan_complete 可为 true，has_more 仍为 true。
 
 阅读的 limit 计算本页消息条目，超长消息片段带相同 id 与递增 text_part。正文不能因过长永远卡在第一条；每页至少推进一个非空片段。coverage.truncated=true 并给续读方式，text_complete=false 不代表原文永久丢失。
 
@@ -215,7 +221,7 @@ MCP 不直接访问数据库文件，也不暴露内部 execQuery。以下是拟
 
 给内部 openMessageCursor 增加可选 afterPosition 完整排序 tuple，用于从服务端已确认的原始扫描位置重建读取，旧调用默认行为不变。确认位置是最后一条原始已处理行，可能不是最后一个匹配/输出消息。RPC 失败或取消后丢弃可能已被推进的 Python cursor，版本一致时从该确认位置重建；不能继续使用进度未知的可变 cursor。
 
-`LocalBackendClient.call` 增加可选 timeoutMs 与 AbortSignal 或等价选项。MCP RPC 执行期限一般 2 秒，传输等待期限留余量约 4 秒；整个扫描工具约 5 秒，期限到前在批次边界暂停并返回续读。某次 RPC 被引擎中断而未返回完整批次时视为失败，不更新扫描游标；版本仍一致才能从上一已确认位置重试。
+`LocalBackendClient.call` 增加可选 timeoutMs 与 AbortSignal 或等价选项。常规 MCP RPC 执行期限一般 2 秒，传输等待期限留余量；原文扫描的打开/拉取批次使用 10 秒。搜索和概览的扫描工作时间约 4.2 秒，大块原文读取约 20 秒，期限到前在批次边界暂停并返回续读。文件导出连续处理批次并提供进度，客户端超时/取消仍通过 signal 传递。某次 RPC 被引擎中断而未返回完整批次时视为失败，不更新扫描游标；版本仍一致才能从上一已确认位置重试。
 
 连接初始化与图片转换分别使用独立期限：初始化建议 10 秒执行/15 秒传输；HEIC 沿用已有限制，最长 60 秒，并支持取消。普通工具的 5 秒扫描期限不能被错误套到初始化或图片转换。客户端断连时先取消当前请求，再关闭自己创建的 Python/Worker；宽限后才终止这些自有进程。
 
@@ -266,7 +272,7 @@ preview 建议最长边 1600 像素、图像内容最多 4 MiB；原图请求上
 
 | 编号 | 要求与通过标准 |
 | --- | --- |
-| S1 | 未准备数据库仍能建立 MCP 连接、列出 7 个工具，status 给恢复动作；snapshot 缺失与图片密钥缺失均不触发扫描/创建 |
+| S1 | 未准备数据库仍能建立 MCP 连接、列出 8 个工具，status 给恢复动作；snapshot 缺失与图片密钥缺失均不触发扫描/创建 |
 | S2 | 同名群/备注定位返回依据；未知群成员/@元数据不编造身份 |
 | S3 | 同秒、跨库、超过 JS 安全整数和进程重启后按消息 ID精确取回；冲突不被吞掉 |
 | S4 | 超长文本分段与取回批次尾部可读完；重复 cursor 重放不跳页；元数据/正文预算都受限 |
@@ -276,11 +282,12 @@ preview 建议最长边 1600 像素、图像内容最多 4 MiB；原图请求上
 | S8 | 工作群前页任务后页取消、无 @指派及媒体缺口场景给 Agent 正确材料；关系场景保留反例和连续对话 |
 | S9 | GUI 关闭的源码版与无外置 Node/Python 的安装版都能联调；profile 锁与协议 stdout 行为一致 |
 | S10 | 目标客户端可呈现图片、结构化结果和续读错误；记录基础定位/阅读/搜索耗时及相同场景上下文成本 |
+| S11 | 默认原文读取超出旧 50 条小页；紧凑格式保留原文和特殊字段并可续读；万条文件导出排序正确，长文完整，取消/版本变化不假报完成 |
 
 上述主要使用合成 fixture 和客户端端到端检查，已有后端回归确认接口兼容。实际通过项与验证边界见 [实现验证记录](mcp-validation.md)。
 
 ## 14 与 PRD 的细化关系
 
-保留 PRD 的 7 个工具和两个主场景。新增细化：overview 支持续读；搜索 query 是明确字面 terms；context 的直接回复只有已扫描窗口/显式 reply_range；媒体首次默认只取 metadata；默认时间/模式和 cursor 重放明确化。
+保留 PRD 的两个主场景，工具扩展为 8 个，加入完整范围文件导出和紧凑大块读取。其他细化：overview 支持续读；搜索 query 是明确字面 terms；context 的直接回复只有已扫描窗口/显式 reply_range；媒体首次默认只取 metadata；默认时间/模式和 cursor 重放明确化。
 
 这些变化用于使需求可实施，不扩大到消息发送、自动任务系统或长期监控。后续如将语音/OCR 提升为首版需求，须同时修改 media 能力与对应验收，不能仅改工具描述。

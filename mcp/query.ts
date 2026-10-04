@@ -3,9 +3,10 @@ import { chatId, decodeChatId, decodeMessageId, personId } from '../shared/chat/
 import { normalizeMessage } from '../shared/chat/normalize'
 import { mapRowsToMessagesLite } from '../shared/chat/decode'
 import { hydrateNames } from './names'
-import type { Coverage, Freshness, ToolData } from './contracts'
+import { READ_DEFAULT_LIMIT, READ_DEFAULT_MAX_CHARS, type Coverage, type Freshness, type ToolData } from './contracts'
+import { compactMessage, compactMessageData } from './format'
 
-type Runtime = {
+export type Runtime = {
   timezone: string
   ensureConnected(signal?: AbortSignal): Promise<{ accountId: string; accountScope: string; dataDir: string; mode: 'live'|'snapshot'; capturedAt?: string|null; snapshotId?: string|null }>
   call(method: string, payload?: Record<string, unknown>, signal?: AbortSignal, timeoutMs?: number): Promise<any>
@@ -125,11 +126,11 @@ async function getRawBatch(runtime: Runtime, scan: ScanChat, state: ScanState, s
         afterPosition = [row.create_time ?? row.createTime, row.sort_seq ?? row.sortSeq ?? 0, row.local_id ?? row.localId ?? 0, row._relative_db ?? '']
       }
     }
-    const opened = await runtime.call('openMessageCursor', { sessionId: scan.sessionId, batchSize: 100, ascending: state.filters.direction !== 'desc', beginTimestamp: state.filters.begin, endTimestamp: state.filters.finish, ...(afterPosition ? { afterPosition } : {}) }, signal, 2000)
+    const opened = await runtime.call('openMessageCursor', { sessionId: scan.sessionId, batchSize: state.filters.batchSize || 100, ascending: state.filters.direction !== 'desc', beginTimestamp: state.filters.begin, endTimestamp: state.filters.finish, ...(afterPosition ? { afterPosition } : {}) }, signal, 10000)
     if (!opened?.success) throw fail('READ_FAILED', opened?.error || '无法打开消息游标。', true)
     scan.cursor = opened.cursor
   }
-  const batch = await runtime.call('fetchMessageBatch', { cursor: scan.cursor }, signal, 2000)
+  const batch = await runtime.call('fetchMessageBatch', { cursor: scan.cursor }, signal, 10000)
   if (!batch?.success) throw fail('READ_FAILED', batch?.error || '读取消息批次失败。', true)
   const rows = Array.isArray(batch.rows) ? batch.rows : []
   for (const row of rows) {
@@ -212,11 +213,11 @@ async function scanReplyRange(runtime: Runtime, conn: Awaited<ReturnType<Runtime
   state.replyComplete = (state.replyScans || []).every((scan: any) => scan.done)
   state.replyScope = { kind: 'reply_range', range: state.scope.reply_range, sessions: state.replyScans.map((scan: any) => scan.sessionId) }
 }
-function pushWithinBudget(messages: any[], candidates: any[], maxChars: number, reserve = Math.min(1500, Math.floor(maxChars * 0.35))): { emitted: any[]; tail: any[]; truncated: boolean } {
+function pushWithinBudget(messages: any[], candidates: any[], maxChars: number, reserve = Math.min(1500, Math.floor(maxChars * 0.35)), compact = false): { emitted: any[]; tail: any[]; truncated: boolean } {
   const emitted: any[] = []; let left = Math.max(0, maxChars - reserve); let truncated = false
   for (const original of candidates) {
     const message = structuredClone(original)
-    const needed = JSON.stringify(message).length
+    const needed = codePoints(JSON.stringify(compact ? compactMessage(message, 'C1', message.sender_id ? 'P1' : null) : message)).length + 1
     if (needed <= left) { emitted.push(message); left -= needed; continue }
     const field = message.raw !== undefined ? 'raw' : 'text'
     const chars = codePoints(message[field] || '')
@@ -239,24 +240,33 @@ function pushWithinBudget(messages: any[], candidates: any[], maxChars: number, 
 async function scanPage(runtime: Runtime, conn: Awaited<ReturnType<Runtime['ensureConnected']>>, state: ScanState, limit: number, maxChars: number, signal?: AbortSignal) {
   ;(state as any).accountId = conn.accountId; (state as any).accountScope = conn.accountScope
   const started = Date.now(); const candidates: any[] = []
-  while (Date.now() - started < 4200 && candidates.length < limit && !signal?.aborted) {
-    if (state.pending.length) { candidates.push(state.pending.shift()); continue }
+  const scanBudgetMs = state.filters.scanBudgetMs || 4200
+  let candidateChars = 0
+  const addCandidate = (message: any) => {
+    candidates.push(message)
+    if (state.tool === 'read_messages' && maxChars !== Infinity) {
+      candidateChars += codePoints(JSON.stringify(state.filters.format === 'compact'
+        ? compactMessage(message, 'C1', message.sender_id ? 'P1' : null) : message)).length + 1
+    }
+  }
+  while (Date.now() - started < scanBudgetMs && candidates.length < limit && candidateChars < maxChars && !signal?.aborted) {
+    if (state.pending.length) { addCandidate(state.pending.shift()); continue }
     const missingHeads = state.chats.filter(c => !c.done && !c.pending.length)
-    for (const c of missingHeads) { if (Date.now() - started >= 4200) break; await getRawBatch(runtime, c, state, signal) }
+    for (const c of missingHeads) await getRawBatch(runtime, c, state, signal)
     const heads = state.chats.filter(c => c.pending.length).sort((a,b) => {
       const aTime = a.pending[0].sent_at, bTime = b.pending[0].sent_at
       return (aTime < bTime ? -1 : aTime > bTime ? 1 : a.id.localeCompare(b.id)) * (state.filters.direction === 'desc' ? -1 : 1)
     })
     if (heads.length) {
       const c = heads[0]; const m = c.pending.shift()
-      if (passFilter(m, state.filters, conn.accountScope) && (state.tool !== 'search_messages' || matchMessage(m, state.filters))) candidates.push(m)
+      if (passFilter(m, state.filters, conn.accountScope) && (state.tool !== 'search_messages' || matchMessage(m, state.filters))) addCandidate(m)
       continue
     }
     if (state.chats.every(c => c.done)) break
   }
   const fitted = state.tool === 'search_messages'
     ? fitSearchHits(candidates, state.filters.terms || [], state.filters.fields || ['text', 'quote', 'attachment_title'], maxChars)
-    : { ...pushWithinBudget([], candidates, maxChars), sources: candidates }
+    : { ...(maxChars === Infinity ? { emitted: candidates, tail: [], truncated: false } : pushWithinBudget([], candidates, maxChars, undefined, state.filters.format === 'compact')), sources: candidates }
   state.pending.unshift(...fitted.tail)
   state.returnedCount += fitted.emitted.length
   const done = state.chats.every(c => c.done && !c.pending.length) && !state.pending.length
@@ -377,8 +387,13 @@ async function scanTool(runtime: Runtime, tool: string, args: any, signal?: Abor
     }
     const scope = args._globalSearch ? { kind: 'account_all', selected_chat_count: chats.length, range: { start: range.start, end: range.end }, filters } : { chat_ids: args.chat_ids, range: { start: range.start, end: range.end }, filters }
     state = await createScans(runtime, conn, chats, tool, scope, range, filters)
-    state.filters.limit = args.limit ?? (tool === 'search_messages' ? 20 : 50)
-    state.filters.maxChars = args.max_chars ?? 12000
+    state.filters.limit = args.limit ?? (tool === 'search_messages' ? 20 : READ_DEFAULT_LIMIT)
+    state.filters.maxChars = args.max_chars ?? (tool === 'search_messages' ? 12000 : READ_DEFAULT_MAX_CHARS)
+    if (tool === 'read_messages') {
+      state.filters.format = args.format || 'normalized'
+      state.filters.batchSize = Math.max(100, Math.min(1000, state.filters.limit))
+      state.filters.scanBudgetMs = 20_000
+    }
   }
   const token = args.cursor || cursors.start(state!, version)
   const page = await cursors.advance<ScanState, any>(token, version, async (s) => {
@@ -394,11 +409,13 @@ async function scanTool(runtime: Runtime, tool: string, args: any, signal?: Abor
       const scope = s.scope
       const coverage = makeCoverage(scope, s.chats, messages.length, scanned.done, more ? 'A'.repeat(24) : null, truncated, sourceMessages, s.unresolvedContent)
       const displayed = messages
-      const visibleIds = new Set(displayed.flatMap((m: any) => [m.chat_id, m.sender_id].filter(Boolean)))
+      const visibleIds = new Set(sourceMessages.flatMap((m: any) => [m.chat_id, m.sender_id, m.quote?.sender_id, ...(m.mentions?.person_ids || [])].filter(Boolean)))
       const chats = Object.fromEntries(Object.entries(hydrated.chats).filter(([id]) => visibleIds.has(id)))
       const people = Object.fromEntries(Object.entries(hydrated.people).filter(([id]) => visibleIds.has(id)))
       const data = tool === 'read_messages'
-        ? dataResult(runtime, conn, queryFreshness, { chats, people, messages: displayed }, coverage, displayed.length)
+        ? dataResult(runtime, conn, queryFreshness, s.filters.format === 'compact'
+          ? compactMessageData(displayed, { chats, people })
+          : { chats, people, messages: displayed }, coverage, displayed.length)
         : dataResult(runtime, conn, queryFreshness, { chats, people, match_mode: 'literal', order: 'chat_activity_then_message_time', total_hits: null, hits: displayed }, coverage, displayed.length)
       return { data, more }
     }
@@ -442,6 +459,31 @@ async function scanTool(runtime: Runtime, tool: string, args: any, signal?: Abor
 }
 
 export async function readMessages(runtime: Runtime, args: any, signal?: AbortSignal) { checkCursorArgs(args); return scanTool(runtime, 'read_messages', args, signal) }
+
+/** Complete normalized batches for file export; bypasses response fitting and replay-page caches. */
+export async function* readMessageBatches(runtime: Runtime, args: any, signal?: AbortSignal): AsyncGenerator<ToolData> {
+  const conn = await runtime.ensureConnected(signal), freshness = await runtime.getFreshness(signal)
+  const range = timeRange(args.range, new Date()), chats = idSessions(conn, args.chat_ids)
+  const filters = { direction: args.direction || 'asc', begin: range.begin, finish: range.finish,
+    sender_ids: args.sender_ids, types: args.types, batchSize: 1000, scanBudgetMs: 20_000 }
+  const scope = { chat_ids: args.chat_ids, range: { start: range.start, end: range.end }, filters }
+  const state = await createScans(runtime, conn, chats, 'read_messages', scope, range, filters)
+  try {
+    let done = false
+    while (!done) {
+      if (signal?.aborted) throw fail('CANCELLED', '导出已取消。')
+      const batch = await scanPage(runtime, conn, state, 1000, Infinity, signal)
+      const checked = await verifiedFreshness(runtime, freshness, signal)
+      done = batch.done
+      yield dataResult(runtime, conn, checked, { messages: batch.messages },
+        makeCoverage(scope, state.chats, state.returnedCount, done, null, false, [], state.unresolvedContent), state.returnedCount)
+    }
+  } finally {
+    for (const chat of state.chats) {
+      if (chat.cursor !== null) await runtime.call('closeMessageCursor', { cursor: chat.cursor }, undefined, 2000).catch(() => undefined)
+    }
+  }
+}
 export async function searchMessages(runtime: Runtime, args: any, signal?: AbortSignal) {
   checkCursorArgs(args)
   if (args.cursor) return scanTool(runtime, 'search_messages', args, signal)

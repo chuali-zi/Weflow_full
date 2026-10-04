@@ -2,7 +2,7 @@
 
 状态：架构已进入实现，运行方式和验证命令见 [使用说明](mcp-usage.md)。日期：2026 年 10 月 3 日。代码基线：`170c4a9`。
 
-需求依据是 [MCP PRD](mcp-prd.md)，实现契约见 [MCP Spec](mcp-spec.md)。本设计确定采用独立 TypeScript MCP 服务、现有常驻 Python 后端和共享的消息解析模块。首版使用 stdio、保留 7 个工具，复用现有只读数据访问；工具提供可追溯材料，分析由调用方 Agent 完成。
+需求依据是 [MCP PRD](mcp-prd.md)，实现契约见 [MCP Spec](mcp-spec.md)。本设计采用独立 TypeScript MCP 服务、现有常驻 Python 后端和共享的消息解析模块。当前使用 stdio、提供 8 个工具，复用现有只读数据访问；新增紧凑大块读取和范围文件导出，分析由调用方 Agent 完成。
 
 ## 1 进程与数据链路
 
@@ -10,7 +10,7 @@
 flowchart TB
     U[用户问题] --> A[调用方 Agent]
     A <-->|MCP stdio| M[独立 MCP 服务 TypeScript]
-    M --> T[7 个工具与统一结果契约]
+    M --> T[8 个工具与统一结果契约]
     T --> Q[查询编排与有界游标]
     Q --> N[共享消息解码与语义字段解析]
     Q <-->|内部 JSON Lines RPC| P[常驻 Python 查询后端]
@@ -48,9 +48,10 @@ Python 继续拥有 SQLCipher/SQLite 连接、密钥缓存访问、分库发现�
 | 位置 | 职责 |
 | --- | --- |
 | `mcp/server.ts` | 参数解析、启动/关闭、stdio transport、注册工具、取消接入 |
-| `mcp/contracts.ts` | 7 个工具 input/output schema、统一消息/coverage/error 类型及默认值 |
+| `mcp/contracts.ts` | 8 个工具 input/output schema、统一消息/coverage/error 类型及默认值 |
 | `mcp/tools.ts` | 薄工具处理器：校验参数、调用查询、组装结果 |
 | `mcp/query.ts` | 有界读取、过滤/搜索、概览计数、多群归并、上下文窗口和覆盖跟踪 |
+| `mcp/format.ts`、`mcp/export.ts` | 紧凑消息格式、完整范围批次写入 JSONL/TXT、名称与状态 manifest、进度通知 |
 | `mcp/cursors.ts` | 内存续读状态、未输出尾部、长文本偏移、结果重放、TTL 与清理 |
 | `mcp/runtime.ts` | profile 与账号选择、只读应用锁检查、后端路径发现、连接与版本生命周期 |
 | `mcp/media.ts` | 按消息读取本机媒体、缓存密钥读取、输出格式与能力状态 |
@@ -61,7 +62,7 @@ Python 继续拥有 SQLCipher/SQLite 连接、密钥缓存访问、分库发现�
 | `python/weflow_backend/image_keys.py` | 抽取只读缓存读取，避免媒体查询触发进程扫描 |
 | `scripts/build-mcp.cjs`、`scripts/mcp.ps1`、`weflow-mcp.cmd` | 独立构建与源码/安装版启动入口 |
 
-查询编排使用现有 `openMessageCursor / fetchMessageBatch` 等接口。发送者与消息类型过滤先在原始批次上执行，正文搜索在归一化后执行；能够安全下推的条件下推 Python，不能为了“下推”改成 raw XML 搜索。
+查询编排使用现有 `openMessageCursor / fetchMessageBatch` 等接口。大块读取默认 500 条/120,000 字符，Agent 可自行选择更大预算与 compact 格式；完整范围导出复用同一归一化和排序，以后端批次直接写文件，绕过响应拆段与重放缓存。发送者与消息类型过滤先在原始批次上执行，正文搜索在归一化后执行；能够安全下推的条件下推 Python，不能为了“下推”改成 raw XML 搜索。
 
 ## 4 开始连接的规则
 
@@ -112,7 +113,7 @@ Python 的 live revision 当前是账号级的，任何相关提交可能使原�
 
 每批次前后核对连接与版本；发生变化时停止本次续读，返回 `CURSOR_STALE` 或 `SOURCE_REPLACED`，带原始范围和重读建议。不要把不同版本的半截结果拼成“完整扫描”。已经输出的消息仍可作为历史证据，但 freshness 说明其读取时点。
 
-MCP 客户端取消直接映射到当前 Python requestId；不能排在同一 SQL 请求之后。工具层执行时间与单次 RPC 超时分开：约 5 秒的工具扫描由多个短 RPC 构成，某次 RPC 本身超时则不能把未知进度当作可恢复扫描点。
+MCP 客户端取消直接映射到当前 Python requestId；不能排在同一 SQL 请求之后。工具层执行时间与单次 RPC 超时分开：搜索/概览约 4.2 秒，大块原文读取约 20 秒；文件导出连续读取并报告进度。某次 RPC 本身超时则不能把未知进度当作可恢复扫描点。
 
 EOF、断连与服务退出清理游标、关闭 Python 和媒体 Worker。服务只停止自己创建的进程，不停止微信或另一个 WeFlow GUI。
 

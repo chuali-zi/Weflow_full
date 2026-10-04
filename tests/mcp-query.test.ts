@@ -1,14 +1,17 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
+import { mkdir, mkdtemp, readFile, rm } from 'node:fs/promises'
+import { join, resolve } from 'node:path'
 import { TOOL_DEFINITIONS } from '../mcp/contracts'
 import { CursorStore } from '../mcp/cursors'
 import { clearCursors, getChatOverview, getMessageContext, readMessages, searchMessages } from '../mcp/query'
 import { accountScope, chatId, messageId, personId } from '../shared/chat/ids'
 import { normalizeMessage } from '../shared/chat/normalize'
+import { exportMessages } from '../mcp/export'
 
-test('MCP publishes exactly the seven stable tools with closed input objects', () => {
+test('MCP publishes the reading tools and bulk export with closed input objects', () => {
   assert.deepEqual(TOOL_DEFINITIONS.map(tool => tool.name), [
-    'get_status', 'find_chats', 'get_chat_overview', 'read_messages', 'search_messages', 'get_message_context', 'get_media',
+    'get_status', 'find_chats', 'get_chat_overview', 'read_messages', 'search_messages', 'get_message_context', 'get_media', 'export_messages',
   ])
   for (const tool of TOOL_DEFINITIONS) {
     assert.equal((tool.inputSchema as any).additionalProperties, false)
@@ -49,8 +52,10 @@ class FakeRuntime {
   connection = { accountId: 'fixture-account', accountScope: scope, dataDir: 'fixture', mode: 'snapshot' as const, snapshotId: 'fixture' }
   rows: Record<string, any[]> = {}
   openedAround = 0
+  fetchedBatches = 0
+  closedCursors = 0
   private nextCursor = 1
-  private cursors = new Map<number, { rows: any[]; index: number }>()
+  private cursors = new Map<number, { rows: any[]; index: number; size: number }>()
   async ensureConnected() { return this.connection }
   async getFreshness() { return fresh }
   async getStatus() { return { schema_version: '1', success: true, account: { id: scope, self_id: null }, timezone: 'UTC', data: {}, coverage: null, freshness: fresh, warnings: [], error: null } }
@@ -62,12 +67,14 @@ class FakeRuntime {
       values.sort((a, b) => (a.create_time - b.create_time) || (a.sort_seq - b.sort_seq) || String(a._relative_db).localeCompare(String(b._relative_db)))
       if (payload.afterPosition) values = values.filter(r => r.create_time > payload.afterPosition[0] || (r.create_time === payload.afterPosition[0] && r.sort_seq > payload.afterPosition[1]))
       if (!payload.ascending) values.reverse()
-      const cursor = this.nextCursor++; this.cursors.set(cursor, { rows: values, index: 0 }); return { success: true, cursor }
+      const cursor = this.nextCursor++; this.cursors.set(cursor, { rows: values, index: 0, size: payload.batchSize }); return { success: true, cursor }
     }
     if (method === 'fetchMessageBatch') {
-      const state = this.cursors.get(payload.cursor)!; const rows = state.rows.slice(state.index, state.index + 100); state.index += rows.length
+      this.fetchedBatches++
+      const state = this.cursors.get(payload.cursor)!; const rows = state.rows.slice(state.index, state.index + state.size); state.index += rows.length
       return { success: true, rows, hasMore: state.index < state.rows.length }
     }
+    if (method === 'closeMessageCursor') { this.cursors.delete(payload.cursor); this.closedCursors++; return { success: true } }
     if (method === 'getMessageByLocator') {
       const list = this.rows[payload.sessionId] || []
       const message = list.find(r => payload.locator?.serverId ? String(r.server_id) === payload.locator.serverId : String(r.local_id) === String(payload.locator?.localId))
@@ -79,7 +86,7 @@ class FakeRuntime {
       const list = this.rows[payload.sessionId] || []; const anchor = list.find(r => String(r.server_id) === payload.anchorLocator.serverId)
       const index = list.indexOf(anchor), count = payload.batchSize - 1
       let values = payload.direction === 'desc' ? list.slice(Math.max(0, index - count), index).reverse() : list.slice(index + 1, index + 1 + count)
-      const cursor = this.nextCursor++; this.cursors.set(cursor, { rows: values, index: 0 }); return { success: true, cursor }
+      const cursor = this.nextCursor++; this.cursors.set(cursor, { rows: values, index: 0, size: payload.batchSize }); return { success: true, cursor }
     }
     if (method === 'getContactsCompact') return { success: true, contacts: [] }
     if (method === 'getSessions') return { success: true, sessions: [] }
@@ -182,4 +189,122 @@ test('explicit reply_range scans only direct quote replies and reports its scope
   assert.equal(output.data.replies.length, 1)
   assert.equal(output.data.reply_search_complete, true)
   assert.equal(output.data.reply_search_scope.kind, 'reply_range')
+})
+
+test('default reads exceed the old 50-message page and compact reads fit more original messages', async () => {
+  clearCursors()
+  const runtime = new FakeRuntime(), session = 'room@chatroom'
+  runtime.rows[session] = Array.from({ length: 1000 }, (_, n) => row(session, n, `消息 ${n}🙂`))
+  const args = { chat_ids: [chatId(scope, session)], range: fixedRange }
+  const defaults = await readMessages(runtime, args)
+  assert.ok((defaults.data.messages as any[]).length > 50)
+  assert.ok(Array.from(JSON.stringify(defaults)).length <= 120_000)
+  const normalized = await readMessages(runtime, { ...args, limit: 1000, max_chars: 80_000 })
+  const compact = await readMessages(runtime, { ...args, limit: 1000, max_chars: 80_000, format: 'compact' })
+  assert.ok((compact.data.messages as any[]).length > (normalized.data.messages as any[]).length)
+  assert.ok(Array.from(JSON.stringify(compact)).length <= 80_000)
+  const columns = compact.data.message_columns as string[]
+  assert.equal((compact.data.messages as any[])[0][columns.indexOf('text')], '消息 0🙂')
+  assert.equal((compact.data.chats as any)[(compact.data.messages as any[])[0][1]].id, chatId(scope, session))
+  assert.equal((compact.data.people as any)[(compact.data.messages as any[])[0][2]].id, personId(scope, 'wx_sender'))
+  assert.equal(compact.data.format, 'compact')
+  runtime.rows[session] = Array.from({ length: 10_000 }, (_, n) => row(session, n, `消息 ${n}`))
+  const before = runtime.fetchedBatches
+  const small = await readMessages(runtime, { ...args, format: 'compact', limit: 10_000, max_chars: 4000 })
+  assert.ok(small.coverage?.has_more)
+  assert.equal(runtime.fetchedBatches - before, 1, 'a small output budget must not scan all 10000 requested rows')
+})
+
+test('compact cursor pages retain Unicode long text, quotes, mentions and unavailable media', async () => {
+  clearCursors()
+  const runtime = new FakeRuntime(), session = 'room@chatroom', original = '正文🙂\n'.repeat(1500)
+  runtime.rows[session] = [row(session, 1, original), row(session, 2, '', { local_type: 34 }),
+    row(session, 3, '<msg><appmsg><title>回应</title><refermsg><svrid>9001</svrid><fromusr>wx_other</fromusr><content>引用内容</content></refermsg></appmsg><atuserlist>wx_target</atuserlist></msg>', { local_type: 49 })]
+  let page = await readMessages(runtime, { chat_ids: [chatId(scope, session)], range: fixedRange, format: 'compact', max_chars: 4000 })
+  const messages: any[] = []
+  let pages = 0
+  while (true) {
+    assert.equal(page.data.format, 'compact')
+    assert.ok(Array.from(JSON.stringify(page)).length <= 4000)
+    messages.push(...page.data.messages as any[])
+    if (!page.coverage?.next_cursor) break
+    const cursor = page.coverage.next_cursor
+    page = await readMessages(runtime, { cursor })
+    assert.deepEqual(await readMessages(runtime, { cursor }), page)
+    assert.ok(++pages < 30)
+  }
+  assert.equal(messages.filter(message => message[4] === 'text').map(message => message[5]).join(''), original)
+  assert.equal(messages.find(message => message[4] === 'voice')[6].attachment.availability, 'unknown')
+  const quote = messages.find(message => message[4] === 'quote')
+  assert.equal(quote[6].quote.text, '引用内容')
+  assert.deepEqual(quote[6].mentions.person_ids, [personId(scope, 'wx_target')])
+  assert.equal(page.coverage?.scan_complete, true)
+})
+
+async function exportTestRoot(t: { after(fn: () => Promise<void>): void }) {
+  const parent = resolve('.runtime/mcp-unit-exports')
+  await mkdir(parent, { recursive: true })
+  const directory = await mkdtemp(join(parent, 'test-'))
+  t.after(() => rm(directory, { recursive: true, force: true }))
+  return directory
+}
+
+test('export streams 10000 messages from multiple chats in order with complete long text and original metadata', async t => {
+  const root = await exportTestRoot(t), runtime = new FakeRuntime(), a = 'first@chatroom', b = 'second@chatroom'
+  const longText = '保留长原文🙂\n'.repeat(4000)
+  runtime.rows[a] = Array.from({ length: 5000 }, (_, n) => row(a, n * 2, n === 20 ? longText : `a ${n}`))
+  runtime.rows[b] = Array.from({ length: 5000 }, (_, n) => row(b, n * 2 + 1, n === 0 ? '' : `b ${n}`, n === 0 ? { local_type: 34 } : {}))
+  const args = { chat_ids: [chatId(scope, a), chatId(scope, b)], range: fixedRange, output_dir: root }
+  const output: any = await exportMessages(runtime, args, root)
+  assert.equal(output.success, true)
+  assert.equal(output.data.message_count, 10_000)
+  assert.equal(output.coverage.scan_complete, true)
+  const messages = (await readFile(output.data.files.jsonl.path, 'utf8')).trimEnd().split('\n').map(line => JSON.parse(line))
+  assert.equal(messages.length, 10_000)
+  assert.equal(new Set(messages.map(message => message.id)).size, 10_000)
+  assert.deepEqual(messages.map(message => message.sent_at), [...messages.map(message => message.sent_at)].sort())
+  assert.equal(messages[40].text, longText)
+  assert.equal(messages[40].text_complete, true)
+  assert.equal(messages[40].text_part, null)
+  assert.equal(messages[1].attachment.availability, 'unknown')
+  assert.equal(runtime.fetchedBatches, 10)
+  assert.equal(runtime.closedCursors, 2)
+  const transcript = await readFile(output.data.files.transcript.path, 'utf8')
+  assert.ok(transcript.includes(longText))
+  assert.ok(transcript.includes(messages[40].id))
+  const manifest = JSON.parse(await readFile(output.data.files.manifest.path, 'utf8'))
+  assert.equal(manifest.status, 'complete')
+  assert.equal(manifest.message_count, 10_000)
+  assert.ok(manifest.people[personId(scope, 'wx_sender')])
+  const filtered: any = await exportMessages(runtime, { ...args, types: ['voice'], direction: 'desc' }, root)
+  assert.notEqual(filtered.data.output_dir, output.data.output_dir)
+  assert.equal(filtered.data.message_count, 1)
+  assert.equal(filtered.coverage.scan_complete, true)
+})
+
+test('cancelled export retains readable partial files and marks them incomplete', async t => {
+  const root = await exportTestRoot(t), runtime = new FakeRuntime(), session = 'room@chatroom', controller = new AbortController()
+  runtime.rows[session] = Array.from({ length: 2500 }, (_, n) => row(session, n, `消息 ${n}`))
+  const output: any = await exportMessages(runtime, { chat_ids: [chatId(scope, session)], range: fixedRange, output_dir: root }, root, controller.signal,
+    async () => { controller.abort() })
+  assert.equal(output.success, false)
+  assert.equal(output.data.status, 'cancelled')
+  assert.equal(output.data.message_count, 1000)
+  assert.equal(output.coverage.scan_complete, false)
+  assert.equal((await readFile(output.data.files.jsonl.path, 'utf8')).trimEnd().split('\n').length, 1000)
+  assert.equal(JSON.parse(await readFile(output.data.files.manifest.path, 'utf8')).status, 'cancelled')
+  assert.equal(runtime.closedCursors, 1)
+})
+
+test('export never reports complete when the data version changes during reading', async t => {
+  const root = await exportTestRoot(t), runtime = new FakeRuntime(), session = 'room@chatroom'
+  runtime.rows[session] = Array.from({ length: 2500 }, (_, n) => row(session, n, `消息 ${n}`))
+  const output: any = await exportMessages(runtime, { chat_ids: [chatId(scope, session)], range: fixedRange, output_dir: root }, root, undefined,
+    async () => { runtime.getFreshness = async () => ({ ...fresh, revision_end: 2 }) })
+  assert.equal(output.success, false)
+  assert.equal(output.error.code, 'CURSOR_STALE')
+  assert.equal(output.data.message_count, 1000)
+  assert.equal(output.coverage.scan_complete, false)
+  assert.equal(JSON.parse(await readFile(output.data.files.manifest.path, 'utf8')).status, 'failed')
+  assert.equal(runtime.closedCursors, 1)
 })

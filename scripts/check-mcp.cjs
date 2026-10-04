@@ -31,9 +31,9 @@ async function main() {
   let stderr = '';
   const metrics = {};
   transport.stderr?.on('data', chunk => { stderr += String(chunk); });
-  const read = async (name, arguments_) => {
+  const read = async (name, arguments_, options) => {
     const started = performance.now();
-    const reply = await client.callTool({ name, arguments: arguments_ });
+    const reply = await client.callTool({ name, arguments: arguments_ }, undefined, options);
     const data = reply.structuredContent || JSON.parse(reply.content.find(x => x.type === 'text').text);
     if (reply.isError || !data.success) throw new Error(`${name}: ${JSON.stringify(data.error || data)}`);
     const metric = metrics[name] ||= { calls: 0, elapsedMs: 0, maxChars: 0 };
@@ -45,7 +45,7 @@ async function main() {
   try {
     await client.connect(transport);
     const listed = await client.listTools();
-    assert.deepEqual(listed.tools.map(x => x.name), ['get_status', 'find_chats', 'get_chat_overview', 'read_messages', 'search_messages', 'get_message_context', 'get_media']);
+    assert.deepEqual(listed.tools.map(x => x.name), ['get_status', 'find_chats', 'get_chat_overview', 'read_messages', 'search_messages', 'get_message_context', 'get_media', 'export_messages']);
     const status = await read('get_status', {});
     assert.equal(status.freshness.mode, mode);
     assert.equal(status.timezone, 'America/New_York');
@@ -72,6 +72,40 @@ async function main() {
     const longParts = messages.filter(m => m.text_part || m.text.includes('长文本片段'));
     assert.equal(Array.from(longParts.map(m => m.text).join('')).length, fixture.longTextCharacters, 'all long-message text is recoverable');
     assert.equal(page.coverage.scan_complete, true);
+    const bulk = await read('read_messages', { chat_ids: [chat.id], range, format: 'compact', limit: 1000, max_chars: 120000 });
+    assert.equal(bulk.coverage.has_more, false);
+    assert.equal(bulk.data.messages.length, new Set(messages.map(m => m.id)).size);
+    const compactText = bulk.data.message_columns.indexOf('text');
+    assert.ok(bulk.data.messages.some(m => m[compactText].includes('取消')));
+    const exported = await read('export_messages', { chat_ids: [chat.id], range });
+    assert.equal(exported.coverage.scan_complete, true);
+    const exportedMessages = fs.readFileSync(exported.data.files.jsonl.path, 'utf8').trimEnd().split('\n').map(line => JSON.parse(line));
+    assert.equal(exportedMessages.length, new Set(messages.map(m => m.id)).size);
+    assert.deepEqual(new Set(exportedMessages.map(m => m.id)), new Set(messages.map(m => m.id)));
+    const manifest = JSON.parse(fs.readFileSync(exported.data.files.manifest.path, 'utf8'));
+    assert.equal(manifest.status, 'complete');
+    assert.equal(manifest.message_count, exportedMessages.length);
+    assert.ok(fs.readFileSync(exported.data.files.transcript.path, 'utf8').includes('取消'));
+    const exportedLong = exportedMessages.find(m => m.text.includes('长文本片段'));
+    assert.equal(Array.from(exportedLong.text).length, fixture.longTextCharacters);
+    assert.equal(exportedLong.text_complete, true);
+    const bulkChat = (await read('find_chats', { query: '批量读取测试群' })).data.chats[0];
+    assert.ok(bulkChat);
+    const thousand = await read('read_messages', { chat_ids: [bulkChat.id], range, format: 'compact', limit: 1000, max_chars: 400000 });
+    assert.equal(thousand.data.messages.length, 1000, 'one tool call returns 1000 complete short messages');
+    assert.equal(thousand.coverage.has_more, true);
+    const exportProgress = [];
+    const largeExport = await read('export_messages', { chat_ids: [bulkChat.id], range }, {
+      timeout: 180000, resetTimeoutOnProgress: true, onprogress: event => exportProgress.push(event.progress),
+    });
+    assert.equal(largeExport.data.message_count, fixture.bulkMessageCount);
+    assert.equal(largeExport.coverage.scan_complete, true);
+    const largeMessages = fs.readFileSync(largeExport.data.files.jsonl.path, 'utf8').trimEnd().split('\n').map(line => JSON.parse(line));
+    assert.equal(largeMessages.length, fixture.bulkMessageCount);
+    assert.equal(new Set(largeMessages.map(m => m.id)).size, fixture.bulkMessageCount);
+    assert.equal(largeMessages[0].text, '批量原文 0🙂');
+    assert.equal(largeMessages.at(-1).text, `批量原文 ${fixture.bulkMessageCount - 1}🙂`);
+    assert.equal(exportProgress.at(-1), fixture.bulkMessageCount);
     const quoted = messages.find(m => m.type === 'quote' && m.quote?.target_id);
     assert.ok(quoted, 'a real quote is retained');
     const quoteContext = await read('get_message_context', { message_ids: [quoted.id], before: 0, after: 0 });
@@ -106,7 +140,7 @@ async function main() {
     fs.writeFileSync(path.join(fixture.userDataPath, 'WeFlow-config.json'), JSON.stringify({ decryptKey: 'lock:synthetic' }));
     const locked = await client.callTool({ name: 'get_status', arguments: {} });
     assert.equal(locked.structuredContent.error.code, 'PROFILE_LOCKED');
-    process.stdout.write(JSON.stringify({ success: true, mode, transport: packagedRoot ? 'packaged-stdio' : 'source-stdio', tools: listed.tools.length, pages, messageParts: messages.length, metrics, checks: [mode, 'find', 'pagination', 'replay', 'budget', 'search', 'context-pagination', 'overview', 'media-state', 'time-validation', 'profile-lock', ...(mode === 'live' ? ['cursor-stale'] : [])] }) + '\n');
+    process.stdout.write(JSON.stringify({ success: true, mode, transport: packagedRoot ? 'packaged-stdio' : 'source-stdio', tools: listed.tools.length, pages, messageParts: messages.length, metrics, checks: [mode, 'find', 'pagination', 'replay', 'budget', 'compact-bulk-read', 'complete-file-export', 'search', 'context-pagination', 'overview', 'media-state', 'time-validation', 'profile-lock', ...(mode === 'live' ? ['cursor-stale'] : [])] }) + '\n');
   } catch (error) {
     if (stderr) process.stderr.write(stderr);
     throw error;

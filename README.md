@@ -14,7 +14,7 @@
 
 ## MCP（聊天读取）
 
-已准备的账号可以通过 `weflow-mcp.cmd` 提供给 Agent。首版包含 7 个工具：定位群聊/私聊、消息概览、原文分页、字面检索、上下文与引用、本机图片和连接状态。数据分析由调用方 Agent 完成。
+已准备的账号可以通过 `weflow-mcp.cmd` 提供给 Agent。当前包含 8 个工具：定位群聊/私聊、消息概览、成批原文读取、字面检索、上下文与引用、本机图片、连接状态和完整范围文件导出。原文读取默认 500 条、120,000 字符，可选紧凑格式；大量记录可一次导出 JSONL 与连续阅读文本。范围、预算和分析方式由调用方 Agent 选择。
 
 安装与客户端接入见 [installed.md](https://github.com/chuali-zi/Weflow_full/blob/main/installed.md)；工具调用和读取限制见 [MCP 使用说明](docs/mcp-usage.md)。CLI 的完整命令、JSON 输出和退出码见 [CLI 使用说明](docs/cli.md)。
 

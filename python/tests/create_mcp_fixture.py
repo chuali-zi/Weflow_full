@@ -38,12 +38,16 @@ def generate(destination, mode="snapshot"):
     contact.execute("UPDATE contact SET nick_name=? WHERE username='123@chatroom'", ("研发工作群",))
     contact.execute("INSERT INTO contact VALUES(?,?,?,?,?)",
                     ("456@chatroom", "", "研发工作群", "", 2))
+    contact.execute("INSERT INTO contact VALUES(?,?,?,?,?)",
+                    ("bulk@chatroom", "", "批量读取测试群", "", 2))
     contact.commit()
     contact.close()
 
     table_peer = message_table("wxid_peer")
     table_work = message_table("123@chatroom")
     table_second = message_table("456@chatroom")
+    table_bulk = message_table("bulk@chatroom")
+    bulk_count = 10000
     schema = ("(local_id INTEGER PRIMARY KEY, server_id INTEGER, local_type INTEGER, sort_seq INTEGER, "
               "real_sender_id INTEGER, create_time INTEGER, message_content BLOB, "
               "WCDB_CT_message_content INTEGER)")
@@ -82,7 +86,10 @@ def generate(destination, mode="snapshot"):
             "SELECT name FROM sqlite_master WHERE type='table'")}
         if table_second.lower() not in catalog:
             connection.execute(f"CREATE TABLE {table_second}{schema}")
+        if table_bulk.lower() not in catalog:
+            connection.execute(f"CREATE TABLE {table_bulk}{schema}")
         connection.execute("INSERT OR IGNORE INTO Name2Id(rowid,user_name) VALUES(?,?)", (88, "456@chatroom"))
+        connection.execute("INSERT OR IGNORE INTO Name2Id(rowid,user_name) VALUES(?,?)", (89, "bulk@chatroom"))
         connection.commit()
         connection.close()
 
@@ -90,6 +97,10 @@ def generate(destination, mode="snapshot"):
     connection.executemany(f"INSERT INTO {table_work} VALUES(?,?,?,?,?,?,?,?)", task_rows)
     connection.executemany(f"INSERT INTO {table_peer} VALUES(?,?,?,?,?,?,?,?)", private_rows)
     connection.executemany(f"INSERT INTO {table_second} VALUES(?,?,?,?,?,?,?,?)", group2_rows)
+    connection.executemany(f"INSERT INTO {table_bulk} VALUES(?,?,?,?,?,?,?,?)", (
+        (10000 + n, 9500000 + n, 1, 10000 + n, 13, now - bulk_count + n,
+         f"批量原文 {n}🙂", 0) for n in range(bulk_count)
+    ))
     connection.commit()
     connection.close()
 
@@ -122,6 +133,7 @@ def generate(destination, mode="snapshot"):
         "end": end,
         "now": datetime.fromtimestamp(now, timezone.utc).isoformat(timespec="seconds"),
         "longTextCharacters": len(long_text),
+        "bulkMessageCount": bulk_count,
         "largeServerId": str(large_server_id),
     }
 

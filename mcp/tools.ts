@@ -2,6 +2,7 @@ import { TOOL_DEFINITIONS, type ToolData } from './contracts'
 import { attachCursorInvalidation, clearCursors, findChats, getChatOverview, getMessageContext, getStatus, readMessages, searchMessages } from './query'
 import type { McpRuntime } from './runtime'
 import { personId } from '../shared/chat/ids'
+import { exportMessages, type ExportProgress } from './export'
 
 export type CallToolResult = { content: Array<Record<string, unknown>>; structuredContent: Record<string, unknown>; isError?: boolean }
 
@@ -53,11 +54,11 @@ function failData(runtime: McpRuntime, error: any): ToolData {
   }
 }
 
-export function createTools(runtime: McpRuntime): { call(name: string, args: unknown, signal?: AbortSignal): Promise<CallToolResult>; close(): Promise<void> } {
+export function createTools(runtime: McpRuntime): { call(name: string, args: unknown, signal?: AbortSignal, onProgress?: ExportProgress): Promise<CallToolResult>; close(): Promise<void> } {
   attachCursorInvalidation(runtime)
   const definitions = new Map<string, (typeof TOOL_DEFINITIONS)[number]>(TOOL_DEFINITIONS.map(d => [d.name, d]))
   return {
-    async call(name, args, signal) {
+    async call(name, args, signal, onProgress) {
       if (!definitions.has(name)) return result(failData(runtime, Object.assign(new Error(`未知工具：${name}`), { code: 'UNKNOWN_TOOL' })))
       if (!validObject(args)) return result(failData(runtime, Object.assign(new Error('工具参数必须是 JSON 对象。'), { code: 'INVALID_ARGUMENT' })))
       const schemaError = validate(args, (definitions.get(name) as any).inputSchema)
@@ -71,6 +72,14 @@ export function createTools(runtime: McpRuntime): { call(name: string, args: unk
           case 'read_messages': data = await readMessages(runtime, args, signal); break
           case 'search_messages': data = await searchMessages(runtime, args, signal); break
           case 'get_message_context': data = await getMessageContext(runtime, args, signal); break
+          case 'export_messages': {
+            data = await exportMessages(runtime, args, runtime.options.userData, signal, onProgress)
+            const files = data.data.files as Record<string, { uri: string; mime_type: string; bytes: number }> | undefined
+            return result(data, Object.entries(files || {}).map(([name, file]) => ({
+              type: 'resource_link', uri: file.uri, name, mimeType: file.mime_type, size: file.bytes,
+              description: '服务端本机导出文件；完整性见 manifest.json。',
+            })))
+          }
           case 'get_media': {
             const media = await import('./media')
             const output = await media.readMedia(runtime, args.message_id, args, signal)
