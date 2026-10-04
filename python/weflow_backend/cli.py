@@ -310,6 +310,8 @@ def configure_gui(args, profile, root):
 
 def launch_gui(args, profile):
     command, directory, env = gui_command(args, profile)
+    mode = getattr(args, '_resolved_mode', None) or getattr(args, 'mode', None)
+    command += ['--show'] + (['--mode', mode] if mode else [])
     logs = profile / 'logs'
     logs.mkdir(parents=True, exist_ok=True)
     log_path = logs / 'cli-gui.log'

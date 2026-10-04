@@ -65,8 +65,22 @@ function traceKeyFlow(stage: string, data?: unknown): void {
 // 会自适应压低采集帧率、显著增加回退路径下折射的跟随延迟。
 // 回退采集只在通知展示的数秒内运行且分辨率已降为逻辑尺寸，放开预算不影响常态性能
 app.commandLine.appendSwitch('webrtc-max-cpu-consumption-percentage', '100')
+const getLaunchArgument = (name: string): string => {
+  for (let index = 0; index < process.argv.length; index += 1) {
+    const value = process.argv[index]
+    if (value === name) return String(process.argv[index + 1] || '').trim()
+    if (value.startsWith(`${name}=`)) return value.slice(name.length + 1).trim()
+  }
+  return ''
+}
+const getLaunchReadMode = (): 'live' | 'snapshot' | undefined => {
+  const mode = getLaunchArgument('--mode')
+  if (!mode) return undefined
+  if (mode !== 'live' && mode !== 'snapshot') throw new Error('--mode 必须是 live 或 snapshot。')
+  return mode
+}
 // Keep this fork's accounts and snapshots separate from upstream WeFlow.
-app.setPath('userData', process.env.WEFLOW_USER_DATA_PATH || join(app.getPath('appData'), 'WeFlow-full'))
+app.setPath('userData', getLaunchArgument('--user-data') || process.env.WEFLOW_USER_DATA_PATH || join(app.getPath('appData'), 'WeFlow-full'))
 
 const preparedConfigureMode = process.argv.includes('--weflow-configure')
 if (preparedConfigureMode) {
@@ -74,14 +88,6 @@ if (preparedConfigureMode) {
   console.info = () => undefined
   console.warn = () => undefined
   console.error = () => undefined
-}
-const getPreparedDataDirArgument = (): string => {
-  for (let index = 0; index < process.argv.length; index += 1) {
-    const value = process.argv[index]
-    if (value === '--data-dir') return String(process.argv[index + 1] || '').trim()
-    if (value.startsWith('--data-dir=')) return value.slice('--data-dir='.length).trim()
-  }
-  return ''
 }
 let preparedConfigureResultWritten = false
 const writePreparedConfigureResult = async (result: Record<string, unknown>): Promise<void> => {
@@ -1123,7 +1129,7 @@ const getPlatformIconName = (): string => {
 
 const resolveAppIconPath = (): string => {
   const iconName = getPlatformIconName()
-  if (!process.env.VITE_DEV_SERVER_URL) {
+  if (app.isPackaged) {
     return join(process.resourcesPath, iconName)
   }
   if (process.platform === 'darwin') {
@@ -5589,7 +5595,7 @@ app.whenReady().then(async () => {
   if (preparedConfigureMode) {
     let result: Record<string, unknown>
     try {
-      const dataDir = getPreparedDataDirArgument()
+      const dataDir = getLaunchArgument('--data-dir')
       if (!dataDir) {
         result = { success: false, code: 'INVALID_ARGUMENT', error: '缺少 --data-dir <db_storage> 参数。' }
       } else {
@@ -5608,7 +5614,7 @@ app.whenReady().then(async () => {
             : join(app.getAppPath(), 'resources')
           const fallbackResources = join(process.cwd(), 'resources')
           const resourcesPath = existsSync(candidateResources) ? candidateResources : fallbackResources
-          result = await configurePreparedLaunch(configService, userDataPath, resourcesPath, dataDir)
+          result = await configurePreparedLaunch(configService, userDataPath, resourcesPath, dataDir, getLaunchReadMode())
         }
       }
     } catch (error) {
@@ -5624,10 +5630,12 @@ app.whenReady().then(async () => {
   }
   // 先初始化配置，以便在启动早期判定是否需要静默启动
   configService = new ConfigService()
+  const launchReadMode = getLaunchReadMode()
+  if (launchReadMode) chatService.setReadMode(launchReadMode)
   applyAutoUpdateChannel('startup')
   syncLaunchAtStartupPreference()
   const onboardingDone = configService.get('onboardingDone') === true
-  const startInBackground = onboardingDone && isSilentStartupEnabled()
+  const startInBackground = onboardingDone && isSilentStartupEnabled() && !process.argv.includes('--show')
   shouldShowMain = onboardingDone
 
   if (!startInBackground) {

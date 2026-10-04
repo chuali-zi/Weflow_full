@@ -5,6 +5,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const assert = require('node:assert/strict');
 const root = path.resolve(__dirname, '..');
+const shortcut = process.argv.includes('--shortcut');
 const packaged = process.argv.includes('--packaged') || process.env.WEFLOW_CHAT_STARTUP_PACKAGED === '1';
 const resources = path.join(root, 'release/win-unpacked/resources');
 if (!process.env.WEFLOW_CHAT_STARTUP_PROFILE) {
@@ -21,18 +22,34 @@ if (!process.env.WEFLOW_CHAT_STARTUP_PROFILE) {
     };
     const fixture = run(['python/tests/create_live_smoke_fixture.py', '.runtime/chat-startup']);
     profile = fixture.userDataPath;
+    // Hide the fixture snapshot: a live configuration must work without one.
+    const snapshots = path.join(profile, 'backend/snapshots');
+    if (fs.existsSync(snapshots)) fs.renameSync(snapshots, snapshots + '-unused');
     assert.equal(run(['-m', 'weflow_backend', 'cli', 'configure', '--mode', 'live', '--user-data', profile,
       '--data-dir', fixture.dataDir, '--quiet']).success, true);
     const file = path.join(profile, 'WeFlow-config.json');
     const config = JSON.parse(fs.readFileSync(file, 'utf8'));
-    Object.assign(config, { agreementAccepted: true, analyticsConsent: false, analyticsDenyCount: 2 });
+    Object.assign(config, { agreementAccepted: true, analyticsConsent: false, analyticsDenyCount: 2,
+      ...(shortcut ? { silentStartup: true } : {}) });
     fs.writeFileSync(file, JSON.stringify(config));
+    if (shortcut) {
+      // A desktop launch must use live even when the last CLI selection was snapshot.
+      const settingsFile = path.join(profile, 'backend/settings.json');
+      const settings = JSON.parse(fs.readFileSync(settingsFile, 'utf8'));
+      for (const key of Object.keys(settings.database_modes || {})) settings.database_modes[key] = 'snapshot';
+      fs.writeFileSync(settingsFile, JSON.stringify(settings));
+    }
   }
   const env = { ...process.env, WEFLOW_CHAT_STARTUP_PROFILE: profile,
     WEFLOW_CHAT_STARTUP_PACKAGED: packaged ? '1' : '0', WEFLOW_USER_DATA_PATH: profile, WEFLOW_CONFIG_CWD: profile,
     WEFLOW_PYTHON: path.join(root, '.venv/Scripts/python.exe'), WEFLOW_BACKEND_ROOT: path.join(root, 'python') };
   delete env.ELECTRON_RUN_AS_NODE;
-  const child = spawn(require('electron'), [__filename], { cwd: root, env, stdio: 'inherit', windowsHide: true });
+  if (shortcut && !packaged) {
+    // Explorer does not supply the test harness's Python/backend/profile environment.
+    for (const key of ['WEFLOW_USER_DATA_PATH', 'WEFLOW_CONFIG_CWD', 'WEFLOW_PYTHON', 'WEFLOW_BACKEND_ROOT']) delete env[key];
+  }
+  const args = shortcut ? [__filename, '--shortcut', '--mode', 'live', '--show', '--user-data', profile] : [__filename];
+  const child = spawn(require('electron'), args, { cwd: root, env, stdio: 'inherit', windowsHide: true });
   child.on('exit', code => { process.exitCode = code || 0; });
   child.on('error', error => { console.error(error); process.exitCode = 1; });
 } else {
@@ -79,11 +96,27 @@ if (!process.env.WEFLOW_CHAT_STARTUP_PROFILE) {
           };
           requestAnimationFrame(frame);
         })`);
+        const status = await evaluate('window.electronAPI.wcdb.getConnectionStatus()');
+        assert.equal(status.mode, 'live');
+        assert.equal(status.state, 'ready');
+        if (shortcut) {
+          let secondInstance = false;
+          app.once('second-instance', () => { secondInstance = true; });
+          const second = spawn(process.execPath, [root, '--mode', 'live', '--show', '--user-data', profile],
+            { cwd: root, env: process.env, stdio: 'ignore', windowsHide: true });
+          const code = await new Promise((resolve, reject) => {
+            second.once('error', reject);
+            second.once('exit', resolve);
+          });
+          assert.equal(code, 0);
+          assert.equal(secondInstance, true, 'Second click must activate the running GUI.');
+          assert.equal((await evaluate('window.electronAPI.wcdb.getConnectionStatus()')).connectionId, status.connectionId);
+        }
         await evaluate(`document.querySelector('.session-item').click()`);
         await wait(`Boolean(document.querySelector('.message-list'))`, 'Conversation did not open');
         await new Promise(resolve => setTimeout(resolve, 1000));
         assert.equal(await evaluate('location.hash'), '#/chat');
-        console.log('CHAT STARTUP PASSED', JSON.stringify(result));
+        console.log('CHAT STARTUP PASSED', JSON.stringify({ ...result, mode: status.mode, repeatedShortcut: shortcut }));
         clearTimeout(deadline); app.exit(0);
       } catch (error) {
         console.error('CHAT STARTUP FAILED', String(error));

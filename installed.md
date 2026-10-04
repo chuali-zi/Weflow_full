@@ -10,9 +10,9 @@
 
 ## 你的任务
 
-请检查本机环境，安装或复用 WeFlow，准备用户的微信账号，把聊天读取 MCP 接入用户使用的智能体或 MCP 客户端，并验证实际连接。执行已授权的依赖下载、构建和客户端配置，不要只返回一份教程。已有安装、已认证密钥和可用配置应优先复用。
+请检查本机环境，安装或复用 WeFlow，准备用户的微信账号，在用户个人桌面创建带 WeFlow 图标的 GUI 快捷方式，把聊天读取 MCP 接入用户使用的智能体或 MCP 客户端，并验证实际连接。执行已授权的依赖下载、构建、快捷方式创建和客户端配置，不要只返回一份教程。已有安装、已认证密钥和可用配置应优先复用。
 
-安装完成的判断是：CLI 能验证所选账号，目标客户端的配置指向真实存在的入口，MCP 客户端能列出 8 个工具（包含 `export_messages`），且 `get_status` 能确认账号和读取模式。配置写入成功与实际连接成功要分别报告。
+安装完成的判断是：CLI 能验证所选账号，桌面 GUI 快捷方式已创建且目标、图标、profile 和读取模式正确，目标客户端的配置指向真实存在的入口，MCP 客户端能列出 8 个工具（包含 `export_messages`），且 `get_status` 能确认账号和读取模式。配置写入成功、快捷方式创建成功与实际连接成功要分别报告。
 
 只有需要用户操作时才暂停，例如登录微信、在多个账号中选择目标、正常退出仍占用配置的应用、处理应用锁或用户协议。不要猜测账号，不要结束微信进程，不要覆盖仓库里的未提交修改。安装验收读取状态即可；聊天分析、批量读取和导出等后面的示例，在用户提出对应任务时执行。
 
@@ -100,7 +100,46 @@ if ($LASTEXITCODE -ne 0) { throw '账号验证失败。' }
 
 需要同时打开桌面应用时，在 `prepare` 后加 `--launch`，或执行 `launch`。新 profile 可能显示用户协议，需要用户在 GUI 中处理。`prepare` / `configure` / `launch` 会将该 profile 的密钥提供程序和 WCDB 切换到内置后端；用户需要保留另一个 profile 的外部工具设置时，使用独立 profile，例如 `%APPDATA%\WeFlow-agent`，并先为它执行同样的准备流程。
 
-## 4. 生成配置并接入 MCP 客户端
+## 4. 自动创建桌面 GUI 快捷方式
+
+账号准备成功后，直接创建快捷方式，不再让用户手动创建，也不要把这一步留成建议。日常入口默认命名为 **WeFlow Live**，固定使用 `live`、第 3 节准备过的 `$weflowProfile` 和本次选定的程序目录。用户明确选择 snapshot 时，使用 **WeFlow Snapshot** 和 `snapshot`。双击应直接打开 GUI，不经过 `prepare`、构建脚本或 MCP 服务。
+
+创建在当前用户的桌面，使用系统返回的实际路径，兼容 OneDrive 重定向；不要默认写公共桌面或要求管理员权限。同名且属于本次安装的快捷方式可更新；同名但指向另一份用户仍在使用的安装时，使用清楚的名称，例如 `WeFlow Live Local.lnk`，并在交付时说明。旧安装版的 `WeFlow` 图标不能当作本次快捷方式验收。
+
+源码版使用项目已有脚本；`prepare` 已经按需构建 GUI：
+
+```powershell
+$weflowGuiMode = 'live' # 用户明确选择 snapshot 时改为 snapshot，并与账号准备及 MCP 保持一致。
+$weflowShortcutName = if ($weflowGuiMode -eq 'live') { 'WeFlow Live.lnk' } else { 'WeFlow Snapshot.lnk' }
+$weflowShortcutPath = Join-Path ([Environment]::GetFolderPath('Desktop')) $weflowShortcutName
+
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\create-desktop-shortcut.ps1 `
+    -UserData $weflowProfile -Mode $weflowGuiMode -ShortcutPath $weflowShortcutPath
+if ($LASTEXITCODE -ne 0) { throw '桌面 GUI 快捷方式创建失败。' }
+```
+
+应用安装版直接指向当前安装目录中的 `WeFlow.exe`，不用安装外部运行时：
+
+```powershell
+$weflowGuiMode = 'live' # 用户明确选择 snapshot 时改为 snapshot。
+$weflowShortcutName = if ($weflowGuiMode -eq 'live') { 'WeFlow Live.lnk' } else { 'WeFlow Snapshot.lnk' }
+$weflowShortcutPath = Join-Path ([Environment]::GetFolderPath('Desktop')) $weflowShortcutName
+$weflowAppRoot = (Get-Location).Path
+$weflowGuiExe = Join-Path $weflowAppRoot 'WeFlow.exe'
+if (-not (Test-Path -LiteralPath $weflowGuiExe)) { throw '没有找到所选安装的 WeFlow.exe。' }
+$weflowShortcutShell = New-Object -ComObject WScript.Shell
+$weflowShortcut = $weflowShortcutShell.CreateShortcut($weflowShortcutPath)
+$weflowShortcut.TargetPath = $weflowGuiExe
+$weflowShortcut.Arguments = '--mode ' + $weflowGuiMode + ' --show --user-data "' + $weflowProfile + '"'
+$weflowShortcut.WorkingDirectory = $weflowAppRoot
+$weflowShortcut.IconLocation = $weflowGuiExe + ',0'
+$weflowShortcut.Description = 'WeFlow (' + $weflowGuiMode + ')'
+$weflowShortcut.Save()
+```
+
+创建后重新读取 `.lnk`，核对 `TargetPath`、`Arguments`、`WorkingDirectory` 和 `IconLocation`；确认目标及图标文件存在，`--mode` 和 `--user-data` 与准备账号时一致。启动参数不应包含 `--weflow-configure`。如果当前 GUI 已经正常运行，不必为验收强制结束它；可以检查快捷方式并唤起窗口。新启动时检查 GUI 的实际连接状态和模式，不要仅凭图标存在宣称已验证 GUI。旧安装包不支持这些启动参数时，改用已构建的当前源码入口。
+
+## 5. 生成配置并接入 MCP 客户端
 
 优先使用用户明确指定的智能体或客户端；未指定时，先检查当前智能体的 MCP 接入方式和本机已有客户端。按客户端实际支持的 CLI、设置界面或配置文件完成注册。客户端的配置格式与位置可能不同，使用其本机帮助或官方文档确认；只有无法判断目标客户端时，才让用户选择。
 
@@ -160,7 +199,7 @@ $weflowClientConfig | ConvertTo-Json -Depth 10
 
 这里接入的是本地 **stdio** 服务，运行在微信数据所在的电脑。远程智能体可通过客户端已有的本地 MCP 连接器访问；仅接受 HTTP 服务且没有本地连接能力的客户端，需要先具备相应连接能力。`--print-config` 不会生成 HTTP 服务地址。切换到 snapshot 时，应先准备快照，再重新生成带 `--mode snapshot` 的客户端配置。
 
-## 5. 验证真实连接并交付
+## 6. 验证真实连接并交付
 
 客户端的配置查看或服务列表只能证明已注册，不能证明账号可读。让 MCP 客户端实际连接、列出工具并调用 `get_status {}`，核对账号、mode、连接状态和数据时间。预期工具为：
 
@@ -179,7 +218,7 @@ export_messages
 
 直接在终端运行 `weflow-mcp.cmd` 后等待输入是正常现象：它是持续运行的 stdio 服务，由 MCP 客户端完成协议握手和工具调用。`--print-config` 仅用于生成配置，不能留在已注册服务的启动参数中。
 
-最后向用户简短报告：安装目录、使用的 profile 与账号、读取模式、目标智能体或客户端、MCP 名称与配置位置、CLI 验证结果、工具列表与 `get_status` 的实际验证结果。如需用户登录、重新加载或新开会话，说明哪个步骤尚未完成及下一步操作。不要输出原始密钥或聊天正文。
+最后向用户简短报告：安装目录、使用的 profile 与账号、读取模式、桌面快捷方式的名称与路径、GUI 是否已实际验证、目标智能体或客户端、MCP 名称与配置位置、CLI 验证结果、工具列表与 `get_status` 的实际验证结果。告诉用户以后双击该桌面图标即可进入 GUI。如需用户登录、重新加载或新开会话，说明哪个步骤尚未完成及下一步操作。不要输出原始密钥或聊天正文。
 
 ## 卸载 MCP 接入
 

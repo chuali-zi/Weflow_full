@@ -7,10 +7,12 @@
 安装指令：[installed.md](https://github.com/chuali-zi/Weflow_full/blob/main/installed.md)。把下面这段话复制给能操作本机终端的 Agent，让它完成 WeFlow 安装，并接入用户使用的 MCP 智能体或客户端：
 
 ```text
-请阅读并执行 https://github.com/chuali-zi/Weflow_full/blob/main/installed.md ，帮我在本机安装 WeFlow，并将它的 MCP 接入我使用的智能体或 MCP 客户端。复用已有安装和配置，默认使用 live 模式，完成后验证 CLI 与 MCP 的实际连接。需要我登录微信或选择账号时再告诉我。
+请阅读并执行 https://github.com/chuali-zi/Weflow_full/blob/main/installed.md ，帮我在本机安装 WeFlow，自动创建带图标的桌面 GUI 快捷方式，并将它的 MCP 接入我使用的智能体或 MCP 客户端。复用已有安装和配置，默认使用 live 模式，完成后验证桌面入口、CLI 与 MCP 的实际连接。需要我登录微信或选择账号时再告诉我。
 ```
 
 详细的环境准备、常见报错、复杂 CLI 用法和 MCP 注册步骤均在该文件中。
+
+日常打开 GUI：双击个人桌面的 **WeFlow Live** 图标，直接进入本地整合版的 live 实时读取模式，无需重复 prepare、退出微信或等待构建。源码版首次运行“启动 WeFlow.cmd”会创建带 WeFlow 图标的快捷方式；已经准备好环境时，也可运行 `powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts\create-desktop-shortcut.ps1` 创建。快捷方式固定指向当前源码目录及 `%APPDATA%\WeFlow-full` 配置，移动项目后需重新创建。它与旧安装版的公共桌面图标分开，创建无需管理员权限。`npm start` 同样默认 live；需要离线模式时可用 `npm start -- --mode snapshot`。
 
 ## MCP（聊天读取）
 

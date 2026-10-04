@@ -108,5 +108,7 @@ if (-not (Test-Path -LiteralPath 'dist-electron\main.js') -or -not (Test-Path -L
     Set-Content -LiteralPath $buildStamp -Value 'ready' -Encoding Ascii
 }
 if ($BuildOnly) { Write-Host 'Build complete.'; exit 0 }
+try { & (Join-Path $PSScriptRoot 'create-desktop-shortcut.ps1') }
+catch { Write-Warning "桌面快捷方式未创建：$($_.Exception.Message)" }
 Write-Host 'Opening WeFlow...'
 Run-Checked $npmExecutable @('start')

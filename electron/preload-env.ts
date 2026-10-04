@@ -1,5 +1,17 @@
 import { join, dirname } from 'path'
 
+// Resolve an explicit profile before imported service singletons read config.
+for (let index = 0; index < process.argv.length; index += 1) {
+    const argument = process.argv[index]
+    const profile = argument === '--user-data' ? process.argv[index + 1]
+        : argument.startsWith('--user-data=') ? argument.slice('--user-data='.length) : ''
+    if (profile) {
+        process.env.WEFLOW_USER_DATA_PATH = profile
+        process.env.WEFLOW_CONFIG_CWD = profile
+        break
+    }
+}
+
 /**
  * 强制将本地资源目录添加到 PATH 最前端，确保优先加载本地 DLL
  * 解决系统中存在冲突版本的数据服务导致的应用崩溃问题
