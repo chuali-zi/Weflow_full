@@ -15,6 +15,7 @@ export type Runtime = {
   onInvalidate?(listener: () => void): () => void
 }
 export type MessagePresentation = (data: ToolData, options: any) => ToolData
+export type MessageProjection = (message: any, options: any) => unknown
 
 type ScanChat = { id: string; sessionId: string; cursor: number | null; done: boolean; scanned: number; pending: any[]; ranges: Array<{ start: string; end: string }>; lastPosition?: unknown }
 type UnresolvedContent = { by_type: Record<string, number>; samples: string[]; count: number }
@@ -238,7 +239,7 @@ function pushWithinBudget(messages: any[], candidates: any[], maxChars: number, 
   return { emitted, tail: [], truncated }
 }
 
-async function scanPage(runtime: Runtime, conn: Awaited<ReturnType<Runtime['ensureConnected']>>, state: ScanState, limit: number, maxChars: number, signal?: AbortSignal) {
+async function scanPage(runtime: Runtime, conn: Awaited<ReturnType<Runtime['ensureConnected']>>, state: ScanState, limit: number, maxChars: number, signal?: AbortSignal, project?: (message: any) => unknown) {
   ;(state as any).accountId = conn.accountId; (state as any).accountScope = conn.accountScope
   const started = Date.now(); const candidates: any[] = []
   const scanBudgetMs = state.filters.scanBudgetMs || 4200
@@ -246,7 +247,7 @@ async function scanPage(runtime: Runtime, conn: Awaited<ReturnType<Runtime['ensu
   const addCandidate = (message: any) => {
     candidates.push(message)
     if ((state.tool === 'read_messages' || state.tool === 'read_conversation') && maxChars !== Infinity) {
-      candidateChars += codePoints(JSON.stringify(state.filters.format === 'compact' || state.tool === 'read_conversation'
+      candidateChars += codePoints(JSON.stringify(project ? project(message) : state.filters.format === 'compact' || state.tool === 'read_conversation'
         ? compactMessage(message, 'C1', message.sender_id ? 'P1' : null) : message)).length + 1
     }
   }
@@ -267,7 +268,7 @@ async function scanPage(runtime: Runtime, conn: Awaited<ReturnType<Runtime['ensu
   }
   const fitted = state.tool === 'search_messages'
     ? fitSearchHits(candidates, state.filters.terms || [], state.filters.fields || ['text', 'quote', 'attachment_title'], maxChars)
-    : { ...(maxChars === Infinity ? { emitted: candidates, tail: [], truncated: false } : pushWithinBudget([], candidates, maxChars, undefined, state.filters.format === 'compact' || state.tool === 'read_conversation')), sources: candidates }
+    : { ...(maxChars === Infinity || project ? { emitted: candidates, tail: [], truncated: false } : pushWithinBudget([], candidates, maxChars, undefined, state.filters.format === 'compact' || state.tool === 'read_conversation')), sources: candidates }
   state.pending.unshift(...fitted.tail)
   state.returnedCount += fitted.emitted.length
   const done = state.chats.every(c => c.done && !c.pending.length) && !state.pending.length
@@ -364,7 +365,7 @@ export async function findChats(runtime: Runtime, args: any, signal?: AbortSigna
 }
 function xScope(args: any, account: string) { return { query: args.query || '', kind: args.kind || 'all', active_since: args.active_since || null, account } }
 
-async function scanTool(runtime: Runtime, tool: string, args: any, signal?: AbortSignal, present?: MessagePresentation): Promise<ToolData> {
+async function scanTool(runtime: Runtime, tool: string, args: any, signal?: AbortSignal, present?: MessagePresentation, project?: MessageProjection): Promise<ToolData> {
   const conn = await runtime.ensureConnected(signal); const freshness = await runtime.getFreshness(signal); const version = versionKey(freshness)
   let state: ScanState | undefined
   if (!args.cursor) {
@@ -400,7 +401,7 @@ async function scanTool(runtime: Runtime, tool: string, args: any, signal?: Abor
   const token = args.cursor || cursors.start(state!, version)
   const page = await cursors.advance<ScanState, any>(token, version, async (s) => {
     if (s.tool !== tool) throw fail('INVALID_ARGUMENT', '请使用创建该游标的同一工具续读。')
-    const scanned = await scanPage(runtime, conn, s, s.filters.limit, s.filters.maxChars, signal)
+    const scanned = await scanPage(runtime, conn, s, s.filters.limit, s.filters.maxChars, signal, project ? message => project(message, s.filters.presentation) : undefined)
     const queryFreshness = await verifiedFreshness(runtime, freshness, signal)
     let messages = scanned.messages
     let sourceMessages = scanned.sources
@@ -463,9 +464,9 @@ async function scanTool(runtime: Runtime, tool: string, args: any, signal?: Abor
 }
 
 export async function readMessages(runtime: Runtime, args: any, signal?: AbortSignal) { checkCursorArgs(args); return scanTool(runtime, 'read_messages', args, signal) }
-export async function readPresentedMessages(runtime: Runtime, args: any, present: MessagePresentation, signal?: AbortSignal) {
+export async function readPresentedMessages(runtime: Runtime, args: any, present: MessagePresentation, signal?: AbortSignal, project?: MessageProjection) {
   checkCursorArgs(args)
-  return scanTool(runtime, 'read_conversation', args, signal, present)
+  return scanTool(runtime, 'read_conversation', args, signal, present, project)
 }
 
 /** Complete normalized batches for file export; bypasses response fitting and replay-page caches. */

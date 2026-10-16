@@ -130,7 +130,7 @@ export class ConversationTools {
     while (this.references.size > MAX_REFERENCES) this.references.delete(this.references.keys().next().value!)
     return ref
   }
-  private project = (source: ToolData, options: Options): ToolData => {
+  private project = (source: ToolData, options: Options, cache?: WeakMap<NormalizedMessage, CleanMessage>): ToolData => {
     const { messages = [], chats = {}, people = {}, ...extra } = source.data as any
     if (extra.reply_search_scope?.sessions) {
       const { sessions: _sessions, ...scope } = extra.reply_search_scope
@@ -142,7 +142,11 @@ export class ConversationTools {
     }
     return { ...cleanEnvelope(source, options), data: {
       mode: options.mode, chats: cleanMetadata(chats), people: cleanMetadata(people),
-      messages: messages.map((m: NormalizedMessage) => cleanConversationMessage(m, { chats, people }, options)),
+      messages: messages.map((m: NormalizedMessage) => {
+        const cleaned = cache?.get(m) || cleanConversationMessage(m, { chats, people }, options)
+        cache?.set(m, cleaned)
+        return cleaned
+      }),
       ...cleanMetadata(extra),
       ...(options.include_source_ids && { source_ids: Object.fromEntries(messages.map((m: NormalizedMessage) => [conversationRef(m.id), m.id])) }),
     } }
@@ -151,7 +155,12 @@ export class ConversationTools {
     const options = args.cursor ? undefined : conversationOptions(args, this.runtime.timezone)
     let after = args.after_message
     if (after && !after.startsWith('wf1_')) [after] = await this.resolve([after], undefined, signal)
-    return readPresentedMessages(this.runtime, args.cursor ? args : { ...args, after_message: after, presentation: options }, this.project, signal)
+    // Fitting may rebuild the same page; fragments have new objects and are projected afresh.
+    const cache = new WeakMap<NormalizedMessage, CleanMessage>()
+    // Names are hydrated after scanning; the final envelope fit accounts for their actual lengths.
+    return readPresentedMessages(this.runtime, args.cursor ? args : { ...args, after_message: after, presentation: options },
+      (source, presentation) => this.project(source, presentation, cache), signal,
+      (message, presentation) => cleanConversationMessage(message, { chats: {}, people: {} }, presentation))
   }
   async context(args: any, signal?: AbortSignal): Promise<ToolData> {
     if (args.cursor) return getMessageContext(this.runtime, args, signal, this.project)

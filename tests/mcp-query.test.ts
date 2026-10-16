@@ -336,12 +336,36 @@ test('conversation cleaning preserves bodies, duplicates, identity, mentions, qu
   assert.equal(analysis.data.messages[0].type, 'text')
 })
 
-test('clean pagination and context preserve Unicode text, budgets, replay, mode, timezones and media lookup', async () => {
+for (const mode of ['analysis', 'reading'] as const) {
+test(`clean ${mode} pages use the response budget and preserve every message body`, async () => {
+  clearCursors()
+  const runtime = new FakeRuntime(), session = 'room@chatroom', reader = new ConversationTools(runtime)
+  runtime.rows[session] = Array.from({ length: 1000 }, (_, n) => row(session, n, `消息 ${n}：${'中文🙂原文'.repeat(30)}`))
+  const bodies = new Map<string, string>()
+  let page: any = await reader.read({ chat_ids: [chatId(scope, session)], range: fixedRange, mode, max_chars: 120_000 })
+  let pages = 0
+  while (true) {
+    const size = Array.from(JSON.stringify(page)).length
+    assert.ok(size <= 120_000)
+    assert.equal(page.data.mode, mode)
+    for (const message of page.data.messages) bodies.set(message.ref, (bodies.get(message.ref) || '') + message.text)
+    if (!page.coverage.has_more) break
+    assert.ok(size >= 108_000, `non-final ${mode} page only used ${size} of 120000 characters`)
+    page = await reader.read({ cursor: page.coverage.next_cursor })
+    assert.ok(++pages < 10)
+  }
+  assert.ok(pages > 0)
+  assert.equal(page.coverage.scan_complete, true)
+  assert.deepEqual([...bodies.values()], runtime.rows[session].map(message => message.message_content))
+})
+
+test(`clean ${mode} pagination and context preserve Unicode text, budgets, replay, mode, timezones and media lookup`, async () => {
   clearCursors()
   const runtime = new FakeRuntime(), session = 'room@chatroom', reader = new ConversationTools(runtime)
   const long = '中文🙂\n'.repeat(2000)
   runtime.rows[session] = [row(session, 0, '开头'), row(session, 1, long), row(session, 2, '结束')]
-  let page: any = await reader.read({ chat_ids: [chatId(scope, session)], range: fixedRange, mode: 'analysis', timezone: 'America/New_York', max_chars: 4000 })
+  let page: any = await reader.read({ chat_ids: [chatId(scope, session)], range: fixedRange, mode, timezone: 'America/New_York', max_chars: 4000 })
+  assert.ok(Array.from(JSON.stringify(page)).length <= 4000)
   const all = [...page.data.messages]
   let count = 0
   while (page.coverage.has_more) {
@@ -349,7 +373,7 @@ test('clean pagination and context preserve Unicode text, budgets, replay, mode,
     page = await reader.read({ cursor })
     assert.deepEqual(await reader.read({ cursor }), page)
     assert.ok(Array.from(JSON.stringify(page)).length <= 4000)
-    assert.equal(page.data.mode, 'analysis')
+    assert.equal(page.data.mode, mode)
     assert.equal(page.timezone, 'America/New_York')
     assert.match(page.data.messages[0].time, /-04:00$/)
     all.push(...page.data.messages)
@@ -358,7 +382,7 @@ test('clean pagination and context preserve Unicode text, budgets, replay, mode,
   const target = conversationRef(messageId(scope, session, runtime.rows[session][1]))
   assert.equal(all.filter(m => m.ref === target).map(m => m.text).join(''), long)
   assert.equal(all.at(-1).text, '结束')
-  let context: any = await reader.context({ message_refs: [target], before: 0, after: 0, mode: 'analysis', include_source_ids: true, max_chars: 4000 })
+  let context: any = await reader.context({ message_refs: [target], before: 0, after: 0, mode, include_source_ids: true, max_chars: 4000 })
   const parts = [...context.data.messages]
   while (context.coverage.has_more) {
     const cursor = context.coverage.next_cursor
@@ -377,6 +401,7 @@ test('clean pagination and context preserve Unicode text, budgets, replay, mode,
   await assert.rejects(() => reader.context({ message_refs: [target] }), { code: 'REFERENCE_EXPIRED' })
   await assert.rejects(() => reader.context({ message_refs: [target], references_file: resolve('.runtime/missing-references.jsonl') }), { code: 'ENOENT' })
 })
+}
 
 test('clean export streams full records and restores exported references after restart', async t => {
   const root = await exportTestRoot(t), runtime = new FakeRuntime(), session = 'room@chatroom', reader = new ConversationTools(runtime)
