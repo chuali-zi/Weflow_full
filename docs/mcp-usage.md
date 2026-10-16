@@ -62,6 +62,59 @@ MCP 服务会保持运行等待客户端请求；在终端直接执行入口时�
 | `get_message_context` | 按消息 ID 补读前后消息和引用，减少断章取义。 |
 | `get_media` | 默认返回媒体状态；显式 `representation: "image"` 返回本机已有图片。 |
 | `export_messages` | 将明确范围的全部消息导出为本机 JSONL、TXT 与 manifest，供 Agent 用文件和代码批量处理。 |
+| `read_conversation` | 优先用于阅读和分析；提供清洗后的原文和短消息引用。 |
+| `export_conversation` | 大范围阅读时优先使用；导出易读 TXT、精简 JSONL 和独立定位映射。 |
+| `get_conversation_context` | 根据短引用补读前后消息和引用；可显式取得原 ID 以调用媒体工具。 |
+
+## 优先使用清洗工具
+
+MCP 启动 `instructions` 和新工具说明均引导 Agent 优先使用上述三个新工具。现有八个工具保留原参数、格式和默认行为，需要完整技术字段、原始内容或排查解析问题时继续使用。
+
+清洗整理的是输出结构：长技术 ID 替换为短引用，重复身份信息集中放入名称表，默认空值省略。不会摘要、抽样、合并重复消息、改变消息顺序或删除正文中的哈希、编号、代码。引用快照、真实 @、系统通知、媒体占位、未解析状态和长消息分段仍保留。未知类型沿用原解析器，无法可靠解析的内容不会被强行剥除。
+
+```json
+{
+  "chat_ids": ["find_chats 返回的完整 ID"],
+  "range": { "start": "2026-10-01T00:00:00-04:00", "end": "2026-10-03T12:00:00-04:00" },
+  "mode": "reading",
+  "timezone": "America/New_York",
+  "limit": 500,
+  "max_chars": 120000
+}
+```
+
+将以上参数交给 `read_conversation`。默认模式 `reading` 在消息中显示发送者姓名、身份短引用及可读媒体说明；`analysis` 使用人物表引用和显式消息类型，适合结构化处理。两种模式的正文和范围相同。`chat_ids`、`sender_ids` 过滤仍使用原有完整 ID；`after_message` 可使用本服务已记录的短消息引用，也接受完整消息 ID，且与旧工具一样仅支持单会话、不与 range 同用。
+
+`timezone` 默认使用服务时区。每条时间包含完整日期、UTC 偏移和原有毫秒精度；名称相同的人仍有不同短引用。会话和人物表键以 `c_`、`p_` 开头，消息引用以 `m_` 开头，由原 ID 生成固定的 22 字符引用，跨页保持一致，账号包含在定位身份中。长 ID 的编码内容不会出现在默认阅读结果中；正文中原本存在的 ID 不会被改动。
+
+`coverage.has_more` 为 true 时仅提交 cursor 给同一个工具；模式、时区、范围和预算沿用首次调用。响应预算按包含元数据的完整 JSON Unicode 字符数计算。扫描和长文本分段共用现有读取逻辑，字数较大的记录可能跨页，需按 ref 和 text_part 拼回。快照时间、数据版本变化、媒体未读状态与旧工具一致。
+
+短消息引用可以直接补读上下文：
+
+```json
+{
+  "message_refs": ["read_conversation 返回的 m_..."],
+  "before": 5,
+  "after": 10,
+  "mode": "analysis",
+  "include_source_ids": true
+}
+```
+
+将以上参数交给 `get_conversation_context`。只有显式 `include_source_ids: true` 时才在 `data.source_ids` 返回本页短引用到完整消息 ID 的映射，可将完整 ID 交给 `get_media`。该工具也支持旧工具返回的完整消息 ID、直接引用回复范围以及 cursor 续读。
+
+服务内最多记住最近 20,000 个消息引用，闲置 30 分钟过期，重启后清空。已过期或被回收的引用返回 `REFERENCE_EXPIRED`，需要重读原范围。上下文工具仍验证消息所属账号，不能用其他账号的引用定位当前账号消息。
+
+`export_conversation` 接受相同的模式、时区、范围、发送者和类型过滤，另可指定绝对 `output_dir`；文件导出没有 limit/max_chars。每次导出创建独立目录，包含：
+
+- `conversation.txt`：时间、会话名、发送者、正文、短引用及可读引用/媒体说明，不附整段技术 JSON。
+- `conversation.jsonl`：每行一条清洗消息，长正文完整保留。人物和会话名称表见 manifest。
+- `manifest.json`：范围、条数、名称表、清洗模式、时区、数据时间、未解析情况和完成状态。
+- `references.jsonl`：短消息引用和完整定位 ID 的映射，也包含可定位的引用目标。映射可跨批次重复；通常无需阅读此文件。
+
+导出返回文件路径、字节数、条数和完成状态，不重复返回全部名称。内存中没有导出引用时，将 `references_file` 设为导出的 `references.jsonl` 绝对路径，交给 `get_conversation_context` 即可恢复回查；服务重启后也可使用，消息仍需能在当前账号数据中定位。定位映射包含原 ID，按聊天记录同等对待。
+
+取消或数据版本变化会保留部分文件并将 manifest 标为 cancelled/failed，不能当作完整范围。Agent 应先确认完成状态，再实际阅读聊天文件；导出成功不表示分析完成。
 
 “工作群有没有给我新任务”通常先定位群聊和本人 ID，再读取自上次检查以来的完整范围。搜索“交付、清单、截止”等词可以帮助发现线索，仍需补读分配对象、后续改期和取消记录。真实 @ 根据微信元数据识别；文本里的称呼不能替代 @。
 
@@ -129,6 +182,6 @@ npm run test:mcp
 npm run check:mcp
 ```
 
-`check:mcp` 使用合成账号和官方 MCP 客户端，通过实际命令入口验证 stdio、8 个工具、分页、重放、预算、长消息、紧凑批量读取、完整文件导出、查询、上下文、媒体状态和应用锁。测试数据留在 `.runtime/mcp-test`。不读取真实账号。
+`check:mcp` 使用合成账号和官方 MCP 客户端，通过实际命令入口验证 stdio、11 个工具、优先工具引导、清洗读取与导出、短引用上下文、分页、重放、预算、长消息、紧凑批量读取、完整文件导出、查询、上下文、媒体状态和应用锁。测试数据留在 `.runtime/mcp-test`。不读取真实账号。
 
 完整设计见 [架构](mcp-architecture.md)、[Spec](mcp-spec.md) 和 [PRD](mcp-prd.md)。

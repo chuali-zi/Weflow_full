@@ -61,6 +61,11 @@ profile 锁配置使用现有 `WeFlow-config.json` 格式，复用 `isLockMode` 
 | `get_message_context` | `message_ids`、`before?`、`after?`、`include_replies?`、`reply_range?`、`format?: normalized|raw`、`max_chars?`、`cursor?` | 默认 before=5、after=10、include_replies=true；before/after 各 0～50；raw 仅按已知 ID取原格式，无全库导出 |
 | `get_media` | `message_id`、`representation?: metadata|image|text`、`quality?: preview|original` | 默认 metadata；图片请求显式 representation=image；text 只返回已可验证的转写/解析结果 |
 | `export_messages` | `chat_ids`、`range`、`sender_ids?`、`types?`、`direction?: asc|desc`、`output_dir?: absolute path` | 连续导出完整范围；返回服务端本机 JSONL/TXT/manifest 路径，无单页条数或字符预算 |
+| `read_conversation` | `chat_ids`、`range?`、`after_message?`、`sender_ids?`、`types?`、`direction?`、`mode?: reading|analysis`、`timezone?`、`limit?`、`max_chars?`、`cursor?` | 优先阅读入口；默认 reading、服务时区、500 条/120,000 字符，范围和条数上限沿用 read_messages；输出短引用和精简原文 |
+| `export_conversation` | `chat_ids`、`range`、`sender_ids?`、`types?`、`direction?`、`mode?`、`timezone?`、`output_dir?` | 优先文件导出入口；生成 conversation.txt、conversation.jsonl、manifest.json、references.jsonl；定位 ID 仅放在独立映射中 |
+| `get_conversation_context` | `message_refs`、`references_file?`、`before?`、`after?`、`include_replies?`、`reply_range?`、`mode?`、`timezone?`、`include_source_ids?`、`max_chars?`、`cursor?` | 接受短引用或完整消息 ID；默认 5/10 邻居、12,000 字符，最多 40,000 字符；仅显式 include_source_ids 才返回本页原 ID |
+
+后三个工具是加法扩展，旧工具的正常请求、默认值和输出保持兼容。启动 instructions 与工具 description 优先引导清洗入口。清洗只整理系统元数据，不改写正文、不删重复消息或正文中的哈希/编号；未知内容保留并标明解析状态。时间以指定时区的带偏移 RFC3339 输出。短引用确定生成且绑定原账号消息身份；内存保存最近 20,000 条、闲置 30 分钟过期，重启后可用 references_file 指定导出的绝对 JSONL 路径回查。此路径仅用于新工具读取定位映射，仍须通过原有账号和消息定位验证。分页、重放、原文分段、快照时效与取消/失败导出沿用已有机制。完整约定与调用示例见 [使用说明](mcp-usage.md#优先使用清洗工具)。
 
 `types` 使用固定枚举 text、image、voice、video、file、link、quote、forwarded、location、system、other。`sender_ids` 与 mentions 的 person_id 使用工具返回的稳定身份，不能用展示昵称代替。
 

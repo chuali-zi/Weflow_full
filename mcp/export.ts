@@ -8,15 +8,21 @@ import type { ToolData } from './contracts'
 import type { NormalizedMessage } from '../shared/chat/normalize'
 
 export type ExportProgress = (count: number, message: string) => Promise<void>
+export type ExportPresentation = {
+  filenames: { jsonl: string; transcript: string }
+  header: string
+  batch(messages: NormalizedMessage[], names: Awaited<ReturnType<typeof hydrateNames>>): { jsonl: string; transcript: string; references: string }
+  manifest(value: any): any
+}
 
 export async function exportMessages(
-  runtime: Runtime, args: any, userData: string, signal?: AbortSignal, onProgress?: ExportProgress,
+  runtime: Runtime, args: any, userData: string, signal?: AbortSignal, onProgress?: ExportProgress, presentation?: ExportPresentation,
 ): Promise<ToolData> {
   if (args.output_dir && !isAbsolute(args.output_dir)) {
     throw Object.assign(new Error('output_dir 必须是绝对目录。'), { code: 'INVALID_ARGUMENT' })
   }
   const batches = readMessageBatches(runtime, args, signal)
-  let jsonl: FileHandle | undefined, transcript: FileHandle | undefined
+  let jsonl: FileHandle | undefined, transcript: FileHandle | undefined, references: FileHandle | undefined
   try {
     // Validate and read the first batch before creating an export directory.
     let next = await batches.next()
@@ -27,22 +33,27 @@ export async function exportMessages(
     await mkdir(root, { recursive: true })
     const directory = await mkdtemp(join(root, 'weflow-'))
     const paths = {
-      jsonl: join(directory, 'messages.jsonl'), transcript: join(directory, 'transcript.txt'), manifest: join(directory, 'manifest.json'),
+      jsonl: join(directory, presentation?.filenames.jsonl || 'messages.jsonl'), transcript: join(directory, presentation?.filenames.transcript || 'transcript.txt'), manifest: join(directory, 'manifest.json'),
+      ...(presentation && { references: join(directory, 'references.jsonl') }),
     }
     let count = 0, status: 'running' | 'complete' | 'cancelled' | 'failed' = 'running'
     let error: ToolData['error'] = null
     const startedAt = new Date().toISOString()
-    const manifest = () => ({
-      schema_version: '1', status, started_at: startedAt, updated_at: new Date().toISOString(),
-      account: latest.account, timezone: runtime.timezone, message_time_format: 'UTC RFC3339',
-      message_count: count, chats: names.chats, people: names.people,
-      coverage: latest.coverage ? { ...latest.coverage, returned_count: count, scan_complete: status === 'complete' } : null,
-      freshness: latest.freshness, files: paths, error,
-    })
+    const manifest = () => {
+      const value = {
+        schema_version: '1', status, started_at: startedAt, updated_at: new Date().toISOString(),
+        account: latest.account, timezone: runtime.timezone, message_time_format: 'UTC RFC3339',
+        message_count: count, chats: names.chats, people: names.people,
+        coverage: latest.coverage ? { ...latest.coverage, returned_count: count, scan_complete: status === 'complete' } : null,
+        freshness: latest.freshness, files: paths, error,
+      }
+      return presentation ? presentation.manifest(value) : value
+    }
     try {
       jsonl = await open(paths.jsonl, 'wx')
       transcript = await open(paths.transcript, 'wx')
-      await transcript.writeFile(`WeFlow 聊天原文\n消息时间：UTC RFC3339\n请求范围：${JSON.stringify(latest.coverage?.requested_scope)}\n参与者和完整消息字段见 manifest.json / messages.jsonl。\n\n`, 'utf8')
+      if (paths.references) references = await open(paths.references, 'wx')
+      await transcript.writeFile(presentation?.header || `WeFlow 聊天原文\n消息时间：UTC RFC3339\n请求范围：${JSON.stringify(latest.coverage?.requested_scope)}\n参与者和完整消息字段见 manifest.json / messages.jsonl。\n\n`, 'utf8')
       await writeFile(paths.manifest, JSON.stringify(manifest(), null, 2) + '\n', 'utf8')
       while (!next.done) {
         if (signal?.aborted) throw Object.assign(new Error('导出已取消。'), { code: 'CANCELLED' })
@@ -59,8 +70,15 @@ export async function exportMessages(
           Object.assign(names.people, additional.people)
         }
         if (messages.length) {
-          await jsonl.writeFile(messages.map(message => JSON.stringify(message) + '\n').join(''), 'utf8')
-          await transcript.writeFile(messages.map(message => formatTranscriptMessage(message, names)).join(''), 'utf8')
+          if (presentation) {
+            const formatted = presentation.batch(messages, names)
+            await jsonl.writeFile(formatted.jsonl, 'utf8')
+            await transcript.writeFile(formatted.transcript, 'utf8')
+            await references!.writeFile(formatted.references, 'utf8')
+          } else {
+            await jsonl.writeFile(messages.map(message => JSON.stringify(message) + '\n').join(''), 'utf8')
+            await transcript.writeFile(messages.map(message => formatTranscriptMessage(message, names)).join(''), 'utf8')
+          }
         }
         count += messages.length
         latest = batch
@@ -77,12 +95,13 @@ export async function exportMessages(
     } finally {
       await jsonl?.close(); jsonl = undefined
       await transcript?.close(); transcript = undefined
+      await references?.close(); references = undefined
     }
     await writeFile(paths.manifest, JSON.stringify(manifest(), null, 2) + '\n', 'utf8')
     const files: Record<string, { path: string; uri: string; mime_type: string; bytes: number }> = {}
     for (const [key, path] of Object.entries(paths)) {
       const metadata = await stat(path).catch(() => null)
-      if (metadata) files[key] = { path, uri: pathToFileURL(path).href, mime_type: key === 'jsonl' ? 'application/x-ndjson' : key === 'manifest' ? 'application/json' : 'text/plain', bytes: metadata.size }
+      if (metadata) files[key] = { path, uri: pathToFileURL(path).href, mime_type: key === 'jsonl' || key === 'references' ? 'application/x-ndjson' : key === 'manifest' ? 'application/json' : 'text/plain', bytes: metadata.size }
     }
     return {
       ...latest, success: status === 'complete', error,
@@ -92,6 +111,7 @@ export async function exportMessages(
   } finally {
     await jsonl?.close().catch(() => undefined)
     await transcript?.close().catch(() => undefined)
+    await references?.close().catch(() => undefined)
     await batches.return(undefined)
   }
 }

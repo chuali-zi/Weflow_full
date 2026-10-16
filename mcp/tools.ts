@@ -3,6 +3,7 @@ import { attachCursorInvalidation, clearCursors, findChats, getChatOverview, get
 import type { McpRuntime } from './runtime'
 import { personId } from '../shared/chat/ids'
 import { exportMessages, type ExportProgress } from './export'
+import { ConversationTools } from './conversation'
 
 export type CallToolResult = { content: Array<Record<string, unknown>>; structuredContent: Record<string, unknown>; isError?: boolean }
 
@@ -57,6 +58,7 @@ function failData(runtime: McpRuntime, error: any): ToolData {
 export function createTools(runtime: McpRuntime): { call(name: string, args: unknown, signal?: AbortSignal, onProgress?: ExportProgress): Promise<CallToolResult>; close(): Promise<void> } {
   attachCursorInvalidation(runtime)
   const definitions = new Map<string, (typeof TOOL_DEFINITIONS)[number]>(TOOL_DEFINITIONS.map(d => [d.name, d]))
+  const conversations = new ConversationTools(runtime)
   return {
     async call(name, args, signal, onProgress) {
       if (!definitions.has(name)) return result(failData(runtime, Object.assign(new Error(`未知工具：${name}`), { code: 'UNKNOWN_TOOL' })))
@@ -72,8 +74,13 @@ export function createTools(runtime: McpRuntime): { call(name: string, args: unk
           case 'read_messages': data = await readMessages(runtime, args, signal); break
           case 'search_messages': data = await searchMessages(runtime, args, signal); break
           case 'get_message_context': data = await getMessageContext(runtime, args, signal); break
-          case 'export_messages': {
-            data = await exportMessages(runtime, args, runtime.options.userData, signal, onProgress)
+          case 'read_conversation': data = await conversations.read(args, signal); break
+          case 'get_conversation_context': data = await conversations.context(args, signal); break
+          case 'export_messages':
+          case 'export_conversation': {
+            data = name === 'export_conversation'
+              ? await conversations.export(args, runtime.options.userData, signal, onProgress)
+              : await exportMessages(runtime, args, runtime.options.userData, signal, onProgress)
             const files = data.data.files as Record<string, { uri: string; mime_type: string; bytes: number }> | undefined
             return result(data, Object.entries(files || {}).map(([name, file]) => ({
               type: 'resource_link', uri: file.uri, name, mimeType: file.mime_type, size: file.bytes,
@@ -95,7 +102,7 @@ export function createTools(runtime: McpRuntime): { call(name: string, args: unk
       }
       // Only restart a fresh read. Continuations must retain their original
       // version, and exports may already have written partial files.
-      const canRetry = !args.cursor && ['find_chats', 'read_messages', 'search_messages', 'get_chat_overview', 'get_message_context', 'get_media'].includes(name)
+      const canRetry = !args.cursor && ['find_chats', 'read_messages', 'search_messages', 'get_chat_overview', 'get_message_context', 'get_media', 'read_conversation', 'get_conversation_context'].includes(name)
       for (let attempt = 0; ; attempt++) {
         try { return await execute() } catch (error: any) {
           if (attempt === 0 && canRetry && !signal?.aborted && ['BACKEND_EXITED', 'BACKEND_STOPPED', 'NOT_CONNECTED', 'LIVE_READ_TIMEOUT', 'CURSOR_STALE'].includes(error?.code)) continue
@@ -103,6 +110,6 @@ export function createTools(runtime: McpRuntime): { call(name: string, args: unk
         }
       }
     },
-    async close() { clearCursors(); await runtime.close() },
+    async close() { conversations.clear(); clearCursors(); await runtime.close() },
   }
 }

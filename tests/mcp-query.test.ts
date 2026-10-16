@@ -9,10 +9,12 @@ import { accountScope, chatId, messageId, personId } from '../shared/chat/ids'
 import { normalizeMessage } from '../shared/chat/normalize'
 import { exportMessages } from '../mcp/export'
 import { createTools } from '../mcp/tools'
+import { ConversationTools, conversationRef } from '../mcp/conversation'
 
 test('MCP publishes the reading tools and bulk export with closed input objects', () => {
   assert.deepEqual(TOOL_DEFINITIONS.map(tool => tool.name), [
     'get_status', 'find_chats', 'get_chat_overview', 'read_messages', 'search_messages', 'get_message_context', 'get_media', 'export_messages',
+    'read_conversation', 'export_conversation', 'get_conversation_context',
   ])
   for (const tool of TOOL_DEFINITIONS) {
     assert.equal((tool.inputSchema as any).additionalProperties, false)
@@ -303,6 +305,124 @@ async function exportTestRoot(t: { after(fn: () => Promise<void>): void }) {
   t.after(() => rm(directory, { recursive: true, force: true }))
   return directory
 }
+
+test('conversation cleaning preserves bodies, duplicates, identity, mentions, quotes and media', async () => {
+  clearCursors()
+  const runtime = new FakeRuntime(), session = 'room@chatroom', reader = new ConversationTools(runtime)
+  const body = 'wf1_这是正文中的编号；提交 a1b2c3；订单 123456；🙂\n保留换行'
+  runtime.rows[session] = [row(session, 0, body), row(session, 1, body, { sender_username: 'wx_other' }),
+    row(session, 2, '<msg><appmsg><title>收到</title><type>57</type><refermsg><svrid>9000</svrid><chatusr>wx_sender</chatusr><content>wf1_引用原文</content></refermsg></appmsg></msg>', { local_type: 49 }),
+    row(session, 3, '@所有人 @张三', { source: '<atuserlist>wx_sender,notify@all</atuserlist>' }),
+    row(session, 4, '', { local_type: 34 })]
+  const call = runtime.call.bind(runtime)
+  runtime.call = async (method, payload) => method === 'getDisplayNames'
+    ? { success: true, map: { [session]: '测试群', wx_sender: '同名', wx_other: '同名' } } : call(method, payload)
+  const args = { chat_ids: [chatId(scope, session)], range: fixedRange, max_chars: 20000 }
+  const original: any = await readMessages(runtime, args)
+  const cleaned: any = await reader.read(args)
+  assert.deepEqual(cleaned.data.messages.map((m: any) => m.text), original.data.messages.map((m: any) => m.text))
+  assert.equal(cleaned.data.messages.length, 5)
+  assert.equal(cleaned.data.messages[0].sender, cleaned.data.messages[1].sender)
+  assert.notEqual(cleaned.data.messages[0].sender_ref, cleaned.data.messages[1].sender_ref)
+  assert.equal(cleaned.data.messages[2].quote.ref, cleaned.data.messages[0].ref)
+  assert.equal(cleaned.data.messages[2].quote.text, 'wf1_引用原文')
+  assert.equal(cleaned.data.messages[3].mentions.everyone, true)
+  assert.equal(cleaned.data.messages[3].mentions.people[0], '同名')
+  assert.equal(cleaned.data.messages[4].media.kind, 'voice')
+  assert.match(cleaned.data.messages[4].media.note, /尚未读取/)
+  assert.ok(JSON.stringify(cleaned).length < JSON.stringify(original).length)
+  const analysis: any = await reader.read({ ...args, mode: 'analysis' })
+  assert.equal(analysis.data.people[analysis.data.messages[0].sender].display_name, '同名')
+  assert.equal(analysis.data.messages[0].type, 'text')
+})
+
+test('clean pagination and context preserve Unicode text, budgets, replay, mode, timezones and media lookup', async () => {
+  clearCursors()
+  const runtime = new FakeRuntime(), session = 'room@chatroom', reader = new ConversationTools(runtime)
+  const long = '中文🙂\n'.repeat(2000)
+  runtime.rows[session] = [row(session, 0, '开头'), row(session, 1, long), row(session, 2, '结束')]
+  let page: any = await reader.read({ chat_ids: [chatId(scope, session)], range: fixedRange, mode: 'analysis', timezone: 'America/New_York', max_chars: 4000 })
+  const all = [...page.data.messages]
+  let count = 0
+  while (page.coverage.has_more) {
+    const cursor = page.coverage.next_cursor
+    page = await reader.read({ cursor })
+    assert.deepEqual(await reader.read({ cursor }), page)
+    assert.ok(Array.from(JSON.stringify(page)).length <= 4000)
+    assert.equal(page.data.mode, 'analysis')
+    assert.equal(page.timezone, 'America/New_York')
+    assert.match(page.data.messages[0].time, /-04:00$/)
+    all.push(...page.data.messages)
+    assert.ok(++count < 30)
+  }
+  const target = conversationRef(messageId(scope, session, runtime.rows[session][1]))
+  assert.equal(all.filter(m => m.ref === target).map(m => m.text).join(''), long)
+  assert.equal(all.at(-1).text, '结束')
+  let context: any = await reader.context({ message_refs: [target], before: 0, after: 0, mode: 'analysis', include_source_ids: true, max_chars: 4000 })
+  const parts = [...context.data.messages]
+  while (context.coverage.has_more) {
+    const cursor = context.coverage.next_cursor
+    context = await reader.context({ cursor })
+    assert.deepEqual(await reader.context({ cursor }), context)
+    assert.ok(Array.from(JSON.stringify(context)).length <= 4000)
+    assert.equal(context.data.source_ids[target], messageId(scope, session, runtime.rows[session][1]))
+    parts.push(...context.data.messages)
+  }
+  assert.equal(parts.map(m => m.text).join(''), long)
+  const after: any = await reader.read({ chat_ids: [chatId(scope, session)], after_message: target })
+  assert.equal(after.data.messages[0].text, '结束')
+  assert.ok(!JSON.stringify(after.coverage).includes('serverId'))
+  await assert.rejects(() => reader.read({ chat_ids: [chatId(scope, session)], timezone: 'invalid/timezone' }), { code: 'INVALID_ARGUMENT' })
+  reader.clear()
+  await assert.rejects(() => reader.context({ message_refs: [target] }), { code: 'REFERENCE_EXPIRED' })
+  await assert.rejects(() => reader.context({ message_refs: [target], references_file: resolve('.runtime/missing-references.jsonl') }), { code: 'ENOENT' })
+})
+
+test('clean export streams full records and restores exported references after restart', async t => {
+  const root = await exportTestRoot(t), runtime = new FakeRuntime(), session = 'room@chatroom', reader = new ConversationTools(runtime)
+  runtime.rows[session] = Array.from({ length: 1100 }, (_, n) => row(session, n, n === 0 ? '正文哈希 abc123🙂\n'.repeat(2000) : `消息 ${n}`))
+  const args = { chat_ids: [chatId(scope, session)], range: fixedRange, output_dir: root, mode: 'analysis', timezone: 'America/New_York' }
+  const output: any = await reader.export(args, root)
+  assert.equal(output.success, true)
+  assert.equal(output.data.message_count, 1100)
+  const records = (await readFile(output.data.files.jsonl.path, 'utf8')).trimEnd().split('\n').map(line => JSON.parse(line))
+  const refs = (await readFile(output.data.files.references.path, 'utf8')).trimEnd().split('\n').map(line => JSON.parse(line))
+  assert.deepEqual(records.map(m => m.text), runtime.rows[session].map(r => r.message_content))
+  assert.equal(refs.length, records.length)
+  assert.equal(new Set(refs.map(r => r.ref)).size, 1100)
+  assert.ok(!JSON.stringify(records).includes('wf1_'))
+  const transcript = await readFile(output.data.files.transcript.path, 'utf8')
+  assert.ok(transcript.includes(records[0].text))
+  assert.ok(!transcript.includes('wf1_'))
+  const manifest = JSON.parse(await readFile(output.data.files.manifest.path, 'utf8'))
+  assert.equal(manifest.status, 'complete')
+  assert.equal(manifest.cleaning.body_preserved, true)
+  assert.equal(manifest.timezone, args.timezone)
+  const restarted = new ConversationTools(runtime)
+  const context: any = await restarted.context({ message_refs: [refs[1099].ref], references_file: output.data.files.references.path, before: 0, after: 0, include_source_ids: true })
+  assert.equal(context.data.messages[0].text, '消息 1099')
+  assert.equal(context.data.source_ids[refs[1099].ref], refs[1099].message_id)
+  assert.equal(runtime.closedCursors, 1)
+})
+
+test('clean export retains partial files and explicit cancellation or stale-data failure', async t => {
+  const root = await exportTestRoot(t), session = 'room@chatroom'
+  for (const reason of ['cancel', 'stale']) {
+    const runtime = new FakeRuntime(), reader = new ConversationTools(runtime), controller = new AbortController()
+    runtime.rows[session] = Array.from({ length: 1500 }, (_, n) => row(session, n, `原文 ${n}`))
+    const output: any = await reader.export({ chat_ids: [chatId(scope, session)], range: fixedRange, output_dir: root }, root, controller.signal, async () => {
+      if (reason === 'cancel') controller.abort()
+      else runtime.getFreshness = async () => ({ ...fresh, revision_end: 2 })
+    })
+    assert.equal(output.success, false)
+    assert.equal(output.data.status, reason === 'cancel' ? 'cancelled' : 'failed')
+    assert.equal(output.coverage.scan_complete, false)
+    assert.equal(output.data.message_count, 1000)
+    assert.equal(JSON.parse(await readFile(output.data.files.manifest.path, 'utf8')).status, output.data.status)
+    assert.equal((await readFile(output.data.files.references.path, 'utf8')).trimEnd().split('\n').length, 1000)
+    assert.equal(runtime.closedCursors, 1)
+  }
+})
 
 test('export streams 10000 messages from multiple chats in order with complete long text and original metadata', async t => {
   const root = await exportTestRoot(t), runtime = new FakeRuntime(), a = 'first@chatroom', b = 'second@chatroom'

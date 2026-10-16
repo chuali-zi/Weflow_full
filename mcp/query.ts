@@ -14,6 +14,7 @@ export type Runtime = {
   getStatus(signal?: AbortSignal): Promise<any>
   onInvalidate?(listener: () => void): () => void
 }
+export type MessagePresentation = (data: ToolData, options: any) => ToolData
 
 type ScanChat = { id: string; sessionId: string; cursor: number | null; done: boolean; scanned: number; pending: any[]; ranges: Array<{ start: string; end: string }>; lastPosition?: unknown }
 type UnresolvedContent = { by_type: Record<string, number>; samples: string[]; count: number }
@@ -244,8 +245,8 @@ async function scanPage(runtime: Runtime, conn: Awaited<ReturnType<Runtime['ensu
   let candidateChars = 0
   const addCandidate = (message: any) => {
     candidates.push(message)
-    if (state.tool === 'read_messages' && maxChars !== Infinity) {
-      candidateChars += codePoints(JSON.stringify(state.filters.format === 'compact'
+    if ((state.tool === 'read_messages' || state.tool === 'read_conversation') && maxChars !== Infinity) {
+      candidateChars += codePoints(JSON.stringify(state.filters.format === 'compact' || state.tool === 'read_conversation'
         ? compactMessage(message, 'C1', message.sender_id ? 'P1' : null) : message)).length + 1
     }
   }
@@ -266,7 +267,7 @@ async function scanPage(runtime: Runtime, conn: Awaited<ReturnType<Runtime['ensu
   }
   const fitted = state.tool === 'search_messages'
     ? fitSearchHits(candidates, state.filters.terms || [], state.filters.fields || ['text', 'quote', 'attachment_title'], maxChars)
-    : { ...(maxChars === Infinity ? { emitted: candidates, tail: [], truncated: false } : pushWithinBudget([], candidates, maxChars, undefined, state.filters.format === 'compact')), sources: candidates }
+    : { ...(maxChars === Infinity ? { emitted: candidates, tail: [], truncated: false } : pushWithinBudget([], candidates, maxChars, undefined, state.filters.format === 'compact' || state.tool === 'read_conversation')), sources: candidates }
   state.pending.unshift(...fitted.tail)
   state.returnedCount += fitted.emitted.length
   const done = state.chats.every(c => c.done && !c.pending.length) && !state.pending.length
@@ -363,14 +364,14 @@ export async function findChats(runtime: Runtime, args: any, signal?: AbortSigna
 }
 function xScope(args: any, account: string) { return { query: args.query || '', kind: args.kind || 'all', active_since: args.active_since || null, account } }
 
-async function scanTool(runtime: Runtime, tool: string, args: any, signal?: AbortSignal): Promise<ToolData> {
+async function scanTool(runtime: Runtime, tool: string, args: any, signal?: AbortSignal, present?: MessagePresentation): Promise<ToolData> {
   const conn = await runtime.ensureConnected(signal); const freshness = await runtime.getFreshness(signal); const version = versionKey(freshness)
   let state: ScanState | undefined
   if (!args.cursor) {
     const range = timeRange(args.range, new Date())
     const chats = args._globalSearch ? (args.chat_ids || []).map((id: string) => ({ id, sessionId: decodeChatId(id, conn.accountScope) })) : idSessions(conn, args.chat_ids)
     const filters: any = { direction: args.direction || 'asc', begin: range.begin, finish: range.finish, sender_ids: args.sender_ids, types: args.types, mentions: args.mentions, selfId: personId(conn.accountScope, conn.accountId), terms: args.query?.terms, operator: args.query?.operator, fields: args.query?.fields, bucket: args.bucket }
-    if (tool === 'read_messages' && args.after_message) {
+    if ((tool === 'read_messages' || tool === 'read_conversation') && args.after_message) {
       if (args.range || chats.length !== 1) throw fail('INVALID_ARGUMENT', 'after_message 仅用于单会话，且不能与 range 同时使用。')
       const anchor = decodeMessageId(args.after_message, conn.accountScope)
       if (anchor.sessionId !== chats[0].sessionId) throw fail('INVALID_ARGUMENT', 'after_message 必须属于所选会话。')
@@ -389,14 +390,16 @@ async function scanTool(runtime: Runtime, tool: string, args: any, signal?: Abor
     state = await createScans(runtime, conn, chats, tool, scope, range, filters)
     state.filters.limit = args.limit ?? (tool === 'search_messages' ? 20 : READ_DEFAULT_LIMIT)
     state.filters.maxChars = args.max_chars ?? (tool === 'search_messages' ? 12000 : READ_DEFAULT_MAX_CHARS)
-    if (tool === 'read_messages') {
+    if (tool === 'read_messages' || tool === 'read_conversation') {
       state.filters.format = args.format || 'normalized'
+      if (present) state.filters.presentation = args.presentation
       state.filters.batchSize = Math.max(100, Math.min(1000, state.filters.limit))
       state.filters.scanBudgetMs = 20_000
     }
   }
   const token = args.cursor || cursors.start(state!, version)
   const page = await cursors.advance<ScanState, any>(token, version, async (s) => {
+    if (s.tool !== tool) throw fail('INVALID_ARGUMENT', '请使用创建该游标的同一工具续读。')
     const scanned = await scanPage(runtime, conn, s, s.filters.limit, s.filters.maxChars, signal)
     const queryFreshness = await verifiedFreshness(runtime, freshness, signal)
     let messages = scanned.messages
@@ -412,18 +415,19 @@ async function scanTool(runtime: Runtime, tool: string, args: any, signal?: Abor
       const visibleIds = new Set(sourceMessages.flatMap((m: any) => [m.chat_id, m.sender_id, m.quote?.sender_id, ...(m.mentions?.person_ids || [])].filter(Boolean)))
       const chats = Object.fromEntries(Object.entries(hydrated.chats).filter(([id]) => visibleIds.has(id)))
       const people = Object.fromEntries(Object.entries(hydrated.people).filter(([id]) => visibleIds.has(id)))
-      const data = tool === 'read_messages'
+      let data = tool === 'read_messages' || tool === 'read_conversation'
         ? dataResult(runtime, conn, queryFreshness, s.filters.format === 'compact'
           ? compactMessageData(displayed, { chats, people })
           : { chats, people, messages: displayed }, coverage, displayed.length)
         : dataResult(runtime, conn, queryFreshness, { chats, people, match_mode: 'literal', order: 'chat_activity_then_message_time', total_hits: null, hits: displayed }, coverage, displayed.length)
+      if (present) data = present(data, s.filters.presentation)
       return { data, more }
     }
     let built = estimate()
     while (Array.from(JSON.stringify(built.data)).length > maxChars && messages.length) {
       const index = messages.length - 1
       const last = messages[index]
-      if (tool === 'read_messages' && codePoints(last.text || '').length > 1) {
+      if ((tool === 'read_messages' || tool === 'read_conversation') && codePoints(last.text || '').length > 1) {
         const original = codePoints(last.text)
         const over = Array.from(JSON.stringify(built.data)).length - maxChars + 24
         if (over >= original.length) {
@@ -459,6 +463,10 @@ async function scanTool(runtime: Runtime, tool: string, args: any, signal?: Abor
 }
 
 export async function readMessages(runtime: Runtime, args: any, signal?: AbortSignal) { checkCursorArgs(args); return scanTool(runtime, 'read_messages', args, signal) }
+export async function readPresentedMessages(runtime: Runtime, args: any, present: MessagePresentation, signal?: AbortSignal) {
+  checkCursorArgs(args)
+  return scanTool(runtime, 'read_conversation', args, signal, present)
+}
 
 /** Complete normalized batches for file export; bypasses response fitting and replay-page caches. */
 export async function* readMessageBatches(runtime: Runtime, args: any, signal?: AbortSignal): AsyncGenerator<ToolData> {
@@ -552,12 +560,13 @@ function formatBucket(date: Date, tz: string, bucket: string): string {
   return day
 }
 
-export async function getMessageContext(runtime: Runtime, args: any, signal?: AbortSignal): Promise<ToolData> {
+export async function getMessageContext(runtime: Runtime, args: any, signal?: AbortSignal, present?: MessagePresentation): Promise<ToolData> {
   checkCursorArgs(args)
   const conn = await runtime.ensureConnected(signal), fresh = await runtime.getFreshness(signal)
   const version = versionKey(fresh)
   if (args.cursor) {
     const page = await cursors.advance<any, any>(args.cursor, version, async state => {
+      if (!!state.presentation !== !!present) throw fail('INVALID_ARGUMENT', '请使用创建该游标的同一上下文工具续读。')
       if (state.replyScans?.length && !state.replyComplete) await scanReplyRange(runtime, conn, state, signal)
       const fitted = pushWithinBudget([], state.remaining, state.maxChars)
       state.remaining = fitted.tail
@@ -570,7 +579,7 @@ export async function getMessageContext(runtime: Runtime, args: any, signal?: Ab
         const people = Object.fromEntries(Object.entries(state.people || {}).filter(([id]) => visibleIds.has(id)))
         const data = dataResult(runtime, conn, state.freshness, { chats, people, messages: items, anchors: state.anchors, windows: state.windows, unresolved_quotes: unresolvedQuotes(items), replies: replyEdges, reply_search_scope: state.replyScope, reply_search_complete: state.replyComplete }, coverage, items.length)
         data.warnings = state.warnings
-        return data
+        return present ? present(data, state.presentation) : data
       })
       state.replyOffset = (state.replyOffset || 0) + replyEdges.length
       return { state, hasMore: state.remaining.length > 0 || state.replyOffset < (state.replies || []).length || !state.replyComplete, value: { data: output } }
@@ -626,7 +635,7 @@ export async function getMessageContext(runtime: Runtime, args: any, signal?: Ab
   const replyRange = args.reply_range ? { start: strictTime(args.reply_range.start).toISOString(), end: strictTime(args.reply_range.end).toISOString() } : null
   const replyScans = replyRange && args.include_replies !== false ? [...new Set(anchors.filter((a:any)=>a.state==='found').map((a:any)=>decodeMessageId(a.message_id, conn.accountScope).sessionId))].map(sessionId => ({ sessionId, cursor: null, done: false, begin: Math.ceil(Date.parse(replyRange.start)/1000), finish: Math.ceil(Date.parse(replyRange.end)/1000)-1 })) : []
   const anchorIds = new Set(anchors.filter((a:any)=>a.state==='found').map((a:any)=>a.message_id))
-  const state = { remaining: fitted.tail, maxChars, freshness: queryFreshness, scope, anchors, warnings, windows, chats: hydrated.chats, people: hydrated.people, unresolvedContent: summarizeUnresolved(uniqueNormalized), replies: args.include_replies === false ? [] : uniqueNormalized.filter(m=>m.quote?.target_id && anchorIds.has(m.quote.target_id) && !anchorIds.has(m.id)), replyOffset: 0, replyScans, replyScope: args.include_replies === false ? 'disabled' : replyRange ? { kind: 'reply_range', range: replyRange } : 'anchor_windows', replyComplete: !replyScans.length }
+  const state = { remaining: fitted.tail, maxChars, freshness: queryFreshness, scope, anchors, warnings, windows, chats: hydrated.chats, people: hydrated.people, unresolvedContent: summarizeUnresolved(uniqueNormalized), replies: args.include_replies === false ? [] : uniqueNormalized.filter(m=>m.quote?.target_id && anchorIds.has(m.quote.target_id) && !anchorIds.has(m.id)), replyOffset: 0, replyScans, replyScope: args.include_replies === false ? 'disabled' : replyRange ? { kind: 'reply_range', range: replyRange } : 'anchor_windows', replyComplete: !replyScans.length, ...(present && { presentation: args.presentation }) }
   if (replyScans.length) await scanReplyRange(runtime, conn, state, signal)
   const output = fitContextOutput(fitted.emitted, state, maxChars, (items, more, truncated) => {
     const coverage = makeCoverage(scope, [], items.length, true, more ? 'A'.repeat(24) : null, truncated || fitted.truncated, [], state.unresolvedContent)
@@ -637,7 +646,7 @@ export async function getMessageContext(runtime: Runtime, args: any, signal?: Ab
     const people = Object.fromEntries(Object.entries(state.people).filter(([id]) => visibleIds.has(id)))
     const data = dataResult(runtime, conn, queryFreshness, { chats, people, messages: items, anchors, windows, unresolved_quotes: unresolvedQuotes(items), replies: replyEdges, reply_search_scope: state.replyScope, reply_search_complete: state.replyComplete }, coverage, items.length)
     data.warnings = warnings
-    return data
+    return present ? present(data, args.presentation) : data
   })
   state.replyOffset = Math.min(state.replies.length, Math.max(1, Math.min(50, Math.floor(maxChars / 180))))
   const next = state.remaining.length || state.replyOffset < state.replies.length || !state.replyComplete ? cursors.start(state, version) : null

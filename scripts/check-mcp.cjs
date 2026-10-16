@@ -30,6 +30,7 @@ async function main() {
   const transport = new StdioClientTransport({ ...serverConfig, cwd: root, stderr: 'pipe' });
   let stderr = '';
   const metrics = {};
+  const cleaningMetrics = {};
   transport.stderr?.on('data', chunk => { stderr += String(chunk); });
   const read = async (name, arguments_, options) => {
     const started = performance.now();
@@ -45,7 +46,8 @@ async function main() {
   try {
     await client.connect(transport);
     const listed = await client.listTools();
-    assert.deepEqual(listed.tools.map(x => x.name), ['get_status', 'find_chats', 'get_chat_overview', 'read_messages', 'search_messages', 'get_message_context', 'get_media', 'export_messages']);
+    assert.deepEqual(listed.tools.map(x => x.name), ['get_status', 'find_chats', 'get_chat_overview', 'read_messages', 'search_messages', 'get_message_context', 'get_media', 'export_messages', 'read_conversation', 'export_conversation', 'get_conversation_context']);
+    assert.match(client.getInstructions(), /Prefer read_conversation/);
     const status = await read('get_status', {});
     assert.equal(status.freshness.mode, mode);
     assert.equal(status.timezone, 'America/New_York');
@@ -89,11 +91,36 @@ async function main() {
     const exportedLong = exportedMessages.find(m => m.text.includes('长文本片段'));
     assert.equal(Array.from(exportedLong.text).length, fixture.longTextCharacters);
     assert.equal(exportedLong.text_complete, true);
+    const cleaned = await read('read_conversation', { chat_ids: [chat.id], range, mode: 'analysis', max_chars: 120000 });
+    assert.equal(cleaned.coverage.has_more, false);
+    assert.deepEqual(cleaned.data.messages.map(m => m.text), exportedMessages.map(m => m.text));
+    assert.ok(!JSON.stringify(cleaned).includes('wf1_'), 'clean response omits source IDs');
+    assert.equal(cleaned.timezone, 'America/New_York');
+    const cleanContext = await read('get_conversation_context', { message_refs: [cleaned.data.messages[0].ref], before: 0, after: 0, include_source_ids: true });
+    assert.equal(cleanContext.data.source_ids[cleaned.data.messages[0].ref], exportedMessages[0].id);
+    const cleanExport = await read('export_conversation', { chat_ids: [chat.id], range, mode: 'analysis' });
+    const cleanRecords = fs.readFileSync(cleanExport.data.files.jsonl.path, 'utf8').trimEnd().split('\n').map(line => JSON.parse(line));
+    assert.deepEqual(cleanRecords.map(m => m.text), exportedMessages.map(m => m.text));
+    assert.ok(!fs.readFileSync(cleanExport.data.files.transcript.path, 'utf8').includes('wf1_'));
+    const cleanManifest = JSON.parse(fs.readFileSync(cleanExport.data.files.manifest.path, 'utf8'));
+    assert.equal(cleanManifest.status, 'complete');
+    assert.equal(cleanManifest.cleaning.body_preserved, true);
+    assert.ok(fs.existsSync(cleanExport.data.files.references.path));
+    const fromFile = await read('get_conversation_context', { message_refs: [cleanRecords.at(-1).ref], references_file: cleanExport.data.files.references.path, before: 0, after: 0 });
+    assert.ok(fromFile.data.messages.some(m => m.ref === cleanRecords.at(-1).ref));
     const bulkChat = (await read('find_chats', { query: '批量读取测试群' })).data.chats[0];
     assert.ok(bulkChat);
     const thousand = await read('read_messages', { chat_ids: [bulkChat.id], range, format: 'compact', limit: 1000, max_chars: 400000 });
     assert.equal(thousand.data.messages.length, 1000, 'one tool call returns 1000 complete short messages');
     assert.equal(thousand.coverage.has_more, true);
+    const originalThousand = await read('read_messages', { chat_ids: [bulkChat.id], range, limit: 1000, max_chars: 2000000 });
+    const cleanThousand = await read('read_conversation', { chat_ids: [bulkChat.id], range, mode: 'analysis', limit: 1000, max_chars: 2000000 });
+    assert.deepEqual(cleanThousand.data.messages.map(m => m.text), originalThousand.data.messages.map(m => m.text));
+    cleaningMetrics.messages = cleanThousand.data.messages.length;
+    cleaningMetrics.originalChars = Array.from(JSON.stringify(originalThousand)).length;
+    cleaningMetrics.cleanedChars = Array.from(JSON.stringify(cleanThousand)).length;
+    assert.equal(cleaningMetrics.messages, 1000);
+    assert.ok(cleaningMetrics.cleanedChars < cleaningMetrics.originalChars);
     const exportProgress = [];
     const largeExport = await read('export_messages', { chat_ids: [bulkChat.id], range }, {
       timeout: 180000, resetTimeoutOnProgress: true, onprogress: event => exportProgress.push(event.progress),
@@ -131,16 +158,19 @@ async function main() {
     assert.equal(invalid.isError, true);
     if (mode === 'live') {
       const first = await read('read_messages', { chat_ids: [chat.id], range, limit: 1 });
+      const cleanFirst = await read('read_conversation', { chat_ids: [chat.id], range, limit: 1 });
       assert.ok(first.coverage.next_cursor);
       const changed = spawnSync(python, ['python/tests/create_mcp_fixture.py', '--mutate-live', fixture.home], { cwd: root, encoding: 'utf8', env: { ...process.env, PYTHONPATH: path.join(root, 'python') } });
       if (changed.status !== 0) throw new Error(changed.error?.message || changed.stderr || 'Live fixture mutation failed.');
       const stale = await client.callTool({ name: 'read_messages', arguments: { cursor: first.coverage.next_cursor } });
       assert.equal(stale.structuredContent.error.code, 'CURSOR_STALE');
+      const cleanStale = await client.callTool({ name: 'read_conversation', arguments: { cursor: cleanFirst.coverage.next_cursor } });
+      assert.equal(cleanStale.structuredContent.error.code, 'CURSOR_STALE');
     }
     fs.writeFileSync(path.join(fixture.userDataPath, 'WeFlow-config.json'), JSON.stringify({ decryptKey: 'lock:synthetic' }));
     const locked = await client.callTool({ name: 'get_status', arguments: {} });
     assert.equal(locked.structuredContent.error.code, 'PROFILE_LOCKED');
-    process.stdout.write(JSON.stringify({ success: true, mode, transport: packagedRoot ? 'packaged-stdio' : 'source-stdio', tools: listed.tools.length, pages, messageParts: messages.length, metrics, checks: [mode, 'find', 'pagination', 'replay', 'budget', 'compact-bulk-read', 'complete-file-export', 'search', 'context-pagination', 'overview', 'media-state', 'time-validation', 'profile-lock', ...(mode === 'live' ? ['cursor-stale'] : [])] }) + '\n');
+    process.stdout.write(JSON.stringify({ success: true, mode, transport: packagedRoot ? 'packaged-stdio' : 'source-stdio', tools: listed.tools.length, pages, messageParts: messages.length, metrics, cleaningMetrics, checks: [mode, 'find', 'pagination', 'replay', 'budget', 'compact-bulk-read', 'complete-file-export', 'clean-reading-context-export', 'preferred-tool-instructions', 'search', 'context-pagination', 'overview', 'media-state', 'time-validation', 'profile-lock', ...(mode === 'live' ? ['cursor-stale'] : [])] }) + '\n');
   } catch (error) {
     if (stderr) process.stderr.write(stderr);
     throw error;

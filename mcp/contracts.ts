@@ -35,6 +35,16 @@ const outputSchema: JsonSchema = {
   }, additionalProperties: false,
 }
 
+const cleaningOptions = {
+  mode: { type: 'string', enum: ['reading', 'analysis'] },
+  timezone: { type: 'string', description: '显示时间的 IANA 时区；默认使用服务时区。' },
+}
+const conversationScope = {
+  chat_ids: { type: 'array', minItems: 1, maxItems: 5, items: str }, range,
+  sender_ids: { type: 'array', items: str, maxItems: 100 }, types: messageTypes,
+  direction: { type: 'string', enum: ['asc', 'desc'] }, ...cleaningOptions,
+}
+
 export const TOOL_DEFINITIONS = [
   { name: 'get_status', description: '查看 WeFlow 本机数据连接与准备状态。', inputSchema: obj({}), outputSchema },
   { name: 'find_chats', description: '按名称查找联系人或群聊；空 query 按最近活动浏览，支持 cursor 续读。', inputSchema: paged({ query: str, kind: { type: 'string', enum: ['private', 'group', 'all'] }, active_since: { type: 'string', format: 'date-time' }, limit: int(1, 50), ...cursor }) , outputSchema },
@@ -44,6 +54,9 @@ export const TOOL_DEFINITIONS = [
   { name: 'get_message_context', description: '读取指定消息及其前后邻居和可确认引用；长结果支持 cursor 续读。', inputSchema: paged({ message_ids: { type: 'array', minItems: 1, maxItems: 10, items: str }, before: int(0, 50), after: int(0, 50), include_replies: { type: 'boolean' }, reply_range: range, format: { type: 'string', enum: ['normalized','raw'] }, max_chars: int(1000, 40000), ...cursor }, ['message_ids']), outputSchema },
   { name: 'get_media', description: '读取消息的本机媒体状态；仅显式 image 请求返回图片内容。', inputSchema: obj({ message_id: str, representation: { type: 'string', enum: ['metadata','image','text'] }, quality: { type: 'string', enum: ['preview','original'] } }, ['message_id']), outputSchema },
   { name: 'export_messages', description: '将指定范围全部原文连续导出为 messages.jsonl、transcript.txt 和 manifest.json，不受单页字符或条数预算限制。返回服务端本机绝对路径，适合能读取本机文件/执行代码的 Agent；自行选择范围、过滤和后续阅读方式。output_dir 可指定绝对输出目录，每次创建独立子目录。完成导出表示材料已取得；理解与分析由 Agent 完成。', inputSchema: obj({ chat_ids: { type: 'array', minItems: 1, maxItems: 5, items: str }, range, sender_ids: { type: 'array', items: str, maxItems: 100 }, types: messageTypes, direction: { type: 'string', enum: ['asc', 'desc'] }, output_dir: { type: 'string', minLength: 1 } }, ['chat_ids', 'range']), outputSchema },
+  { name: 'read_conversation', description: '优先用于阅读和分析聊天原文。清理系统长 ID、重复字段和默认空值，不摘要、不抽样、不改写正文；正文中的哈希和编号保留。reading 显示名称和可读说明，analysis 使用人物表和结构化关系。返回短消息引用供 get_conversation_context 回查。默认 500 条/120000 字符；按 coverage 续读，cursor 调用沿用模式和时区。', inputSchema: paged({ ...conversationScope, after_message: str, limit: int(1, READ_MAX_LIMIT), max_chars: int(1000, READ_MAX_CHARS), ...cursor }, ['chat_ids']), outputSchema },
+  { name: 'export_conversation', description: '大量聊天且可访问服务端本机文件时优先使用。连续导出清洗后的 conversation.txt、conversation.jsonl、manifest.json、references.jsonl，正文不摘要不抽样。长定位 ID 仅放在 references.jsonl；get_conversation_context 可用 references_file 回查。导出完成不表示已阅读；检查 manifest 完成状态后实际处理文件。', inputSchema: obj({ ...conversationScope, output_dir: { type: 'string', minLength: 1 } }, ['chat_ids', 'range']), outputSchema },
+  { name: 'get_conversation_context', description: '优先用于根据短消息引用补读前后原文、引用和回复。message_refs 来自新工具，也接受旧工具的完整消息 ID。内存引用闲置 30 分钟或服务重启后需重读；导出引用可提供 references_file（references.jsonl 绝对路径）恢复。需调用 get_media 时显式 include_source_ids=true 获取本页原 ID 映射。cursor 续读沿用设置。', inputSchema: paged({ message_refs: { type: 'array', minItems: 1, maxItems: 10, items: str }, references_file: str, before: int(0, 50), after: int(0, 50), include_replies: { type: 'boolean' }, reply_range: range, include_source_ids: { type: 'boolean' }, ...cleaningOptions, max_chars: int(1000, 40000), ...cursor }, ['message_refs']), outputSchema },
 ] as const
 
 export type ToolName = typeof TOOL_DEFINITIONS[number]['name']
