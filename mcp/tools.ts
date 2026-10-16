@@ -63,7 +63,7 @@ export function createTools(runtime: McpRuntime): { call(name: string, args: unk
       if (!validObject(args)) return result(failData(runtime, Object.assign(new Error('工具参数必须是 JSON 对象。'), { code: 'INVALID_ARGUMENT' })))
       const schemaError = validate(args, argumentSchema(definitions.get(name)!.inputSchema, args))
       if (schemaError) return result(failData(runtime, Object.assign(new Error(schemaError), { code: 'INVALID_ARGUMENT' })))
-      try {
+      const execute = async (): Promise<CallToolResult> => {
         let data: ToolData
         switch (name) {
           case 'get_status': data = await getStatus(runtime, signal); break
@@ -92,7 +92,16 @@ export function createTools(runtime: McpRuntime): { call(name: string, args: unk
           default: return result(failData(runtime, Object.assign(new Error(`未知工具：${name}`), { code: 'UNKNOWN_TOOL' })))
         }
         return result(data)
-      } catch (e) { return result(failData(runtime, e)) }
+      }
+      // Only restart a fresh read. Continuations must retain their original
+      // version, and exports may already have written partial files.
+      const canRetry = !args.cursor && ['find_chats', 'read_messages', 'search_messages', 'get_chat_overview', 'get_message_context', 'get_media'].includes(name)
+      for (let attempt = 0; ; attempt++) {
+        try { return await execute() } catch (error: any) {
+          if (attempt === 0 && canRetry && !signal?.aborted && ['BACKEND_EXITED', 'BACKEND_STOPPED', 'NOT_CONNECTED', 'LIVE_READ_TIMEOUT', 'CURSOR_STALE'].includes(error?.code)) continue
+          return result(failData(runtime, error))
+        }
+      }
     },
     async close() { clearCursors(); await runtime.close() },
   }

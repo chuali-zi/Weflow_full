@@ -99,6 +99,38 @@ class FakeRuntime {
 }
 const fixedRange = { start: '2026-09-01T00:00:00Z', end: '2026-10-04T00:00:00Z' }
 
+test('fresh reads retry transient failures once, while continuations and cancellations do not retry', async () => {
+  for (const code of ['BACKEND_EXITED', 'BACKEND_STOPPED', 'NOT_CONNECTED', 'LIVE_READ_TIMEOUT', 'CURSOR_STALE']) {
+    const runtime = new FakeRuntime(), call = runtime.call.bind(runtime)
+    let attempts = 0
+    runtime.call = async (method, payload) => {
+      if (method === 'getContactsCompact' && ++attempts === 1) throw Object.assign(new Error('synthetic failure'), { code })
+      return call(method, payload)
+    }
+    const tools = createTools(runtime as any)
+    try {
+      assert.equal((await tools.call('find_chats', { limit: 1 })).structuredContent.success, true, code)
+      assert.equal(attempts, 2, code)
+    } finally { await tools.close() }
+  }
+  for (const [args, code, expectedAttempts] of [
+    [{ limit: 1 }, 'BACKEND_EXITED', 2],
+    [{ cursor: 'old-query' }, 'BACKEND_EXITED', 1],
+    [{ limit: 1 }, 'CANCELLED', 1],
+    [{ limit: 1 }, 'KEY_NOT_FOUND', 1],
+  ] as const) {
+    const runtime = new FakeRuntime()
+    let attempts = 0
+    runtime.getFreshness = async () => { attempts++; throw Object.assign(new Error('synthetic failure'), { code }) }
+    const tools = createTools(runtime as any)
+    try {
+      const output = await tools.call('find_chats', args)
+      assert.equal((output.structuredContent.error as any).code, code)
+      assert.equal(attempts, expectedAttempts)
+    } finally { await tools.close() }
+  }
+})
+
 test('flat schemas still enforce first-call requirements and cursor-only continuation', async () => {
   clearCursors()
   const tools = createTools(new FakeRuntime() as any)

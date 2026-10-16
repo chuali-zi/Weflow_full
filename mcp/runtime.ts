@@ -9,8 +9,8 @@ export type RuntimeOptions = { userData: string; dataDir?: string; mode?: 'live'
 export type Connection = { accountId: string; accountScope: string; dataDir: string; mode: 'live' | 'snapshot'; capturedAt?: string; snapshotId?: string }
 export type Freshness = { mode: 'live' | 'snapshot' | 'unconnected'; queried_at: string; connection_id: string | null; revision_start: number | null; revision_end: number | null; snapshot_id: string | null; captured_at: string | null; consistency: 'per_database' | 'fixed_snapshot' | 'unknown' }
 
-export function runtimeError(code: string, message: string, action?: string): Error & { code: string; action?: string } {
-  return Object.assign(new Error(message), { code, action })
+export function runtimeError(code: string, message: string, action?: string): Error & { code: string; action?: string; retryable: boolean } {
+  return Object.assign(new Error(message), { code, action, retryable: ['LIVE_READ_TIMEOUT', 'LIVE_BUSY', 'BACKEND_EXITED', 'BACKEND_STOPPED', 'NOT_CONNECTED', 'SOURCE_REPLACED'].includes(code) })
 }
 export function defaultUserData(): string { return join(process.env.APPDATA || join(homedir(), 'AppData', 'Roaming'), 'WeFlow-full') }
 
@@ -38,6 +38,13 @@ export class McpRuntime {
     this.backend.onEvent(event => {
       const payload = event.payload as Record<string, any> | undefined
       if (!payload) return
+      if (event.type === 'connection-status' && payload.state === 'disconnected') {
+        this.connection = null
+        this.connectionId = null
+        this.revision = null
+        this.invalidate()
+        return
+      }
       if (event.type === 'change' || (event.type === 'connection-status' && payload.connectionId !== this.connectionId)) this.invalidate()
       if (typeof payload.revision === 'number') this.revision = payload.revision
       if (typeof payload.connectionId === 'string') this.connectionId = payload.connectionId
@@ -71,7 +78,14 @@ export class McpRuntime {
       this.checkProfile()
       const result = await this.backend.call<any>(method, { ...payload, timeoutMs }, undefined, ++this.requestId, { timeoutMs: timeoutMs + 2000, signal })
       this.checkProfile()
-      if (result?.success === false) throw runtimeError(String(result.code || 'BACKEND_ERROR'), String(result.error || '本地读取失败。').replace(/[a-f\d]{64}/gi, '[已隐藏]'), typeof result.action === 'string' ? result.action : undefined)
+      if (result?.success === false) {
+        if (result.code === 'LIVE_READ_TIMEOUT') this.backend.dispose()
+        if (result.code === 'NOT_CONNECTED' || result.code === 'LIVE_READ_TIMEOUT') {
+          this.connection = null
+          this.invalidate()
+        }
+        throw runtimeError(String(result.code || 'BACKEND_ERROR'), String(result.error || '本地读取失败。').replace(/[a-f\d]{64}/gi, '[已隐藏]'), typeof result.action === 'string' ? result.action : undefined)
+      }
       return result as T
     }
     const pending = this.queue.then(run, run)
@@ -126,10 +140,10 @@ export class McpRuntime {
           capabilities: { text: true, quotes: true, compact_messages: true, message_export: 'local_files', local_images: 'on_demand', live: connection.mode === 'live', complete_group_members: false, voice_transcription: false, ocr: false }, recovery_actions: [] },
         coverage: null, freshness, warnings: [], error: null }
     } catch (caught) {
-      const error = caught as Error & { code?: string; action?: string }
+      const error = caught as Error & { code?: string; action?: string; retryable?: boolean }
       return { schema_version: '1', success: false, account: null, timezone: this.timezone, data: { state: 'unconnected', recovery_actions: error.action ? [error.action] : [] }, coverage: null,
         freshness: { mode: 'unconnected', queried_at: new Date().toISOString(), connection_id: null, revision_start: null, revision_end: null, snapshot_id: null, captured_at: null, consistency: 'unknown' }, warnings: [],
-        error: { code: error.code || 'BACKEND_ERROR', message: error.message, retryable: false, action: error.action || '检查 WeFlow 的账号准备与配置。' } }
+        error: { code: error.code || 'BACKEND_ERROR', message: error.message, retryable: !!error.retryable, action: error.action || '检查 WeFlow 的账号准备与配置。' } }
     }
   }
 

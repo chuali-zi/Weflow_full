@@ -25,6 +25,11 @@ export class LocalBackendClient {
     this.eventListeners.add(listener)
     return () => this.eventListeners.delete(listener)
   }
+  private disconnected(code: string): void {
+    for (const listener of this.eventListeners) {
+      try { listener({ type: 'connection-status', payload: { state: 'disconnected', connectionId: null, revision: null, code } }) } catch { /* event consumers must not break transport */ }
+    }
+  }
   private start(): void {
     if (this.child) return
     const resources = this.resourcesPath || (process as NodeJS.Process & { resourcesPath?: string }).resourcesPath || ''
@@ -83,9 +88,10 @@ export class LocalBackendClient {
       }
       this.pending.clear()
       lines.close()
+      this.disconnected('BACKEND_EXITED')
     }
-    child.on('error', fail)
-    child.on('exit', (code) => fail(new Error(`内置后端已退出（${code ?? '中断'}），请重新打开记录。`)))
+    child.on('error', () => fail(Object.assign(new Error('内置后端启动失败，请检查本地运行环境。'), { code: 'BACKEND_EXITED', retryable: true })))
+    child.on('exit', (code) => fail(Object.assign(new Error(`内置后端已退出（${code ?? '中断'}），可重试读取。`), { code: 'BACKEND_EXITED', retryable: true })))
     child.stdin.on('error', () => {})
   }
   call<T = any>(method: string, payload: Record<string, any> = {}, progress?: (message: string) => void, requestId?: number, options?: { timeoutMs?: number; signal?: AbortSignal }): Promise<T> {
@@ -134,10 +140,11 @@ export class LocalBackendClient {
     this.child = null
     for (const entry of this.pending.values()) {
       clearTimeout(entry.timer)
-      entry.reject(new Error('记录处理已停止。'))
+      entry.reject(Object.assign(new Error('记录处理已停止。'), { code: 'BACKEND_STOPPED', retryable: true }))
     }
     this.pending.clear()
     if (child) {
+      this.disconnected('BACKEND_STOPPED')
       child.stdin.end()
       const timer = setTimeout(() => { if (child.exitCode === null) child.kill() }, 2000)
       timer.unref()

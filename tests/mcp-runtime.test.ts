@@ -4,6 +4,9 @@ import { mkdirSync, mkdtempSync, writeFileSync, rmSync } from 'node:fs'
 import { join, resolve } from 'node:path'
 import { McpRuntime } from '../mcp/runtime'
 import { LocalBackendClient } from '../electron/services/localBackendClient'
+import { spawnSync } from 'node:child_process'
+import { once } from 'node:events'
+import { createTools } from '../mcp/tools'
 
 test('unprepared, damaged and locked profiles fail before launching a backend', async () => {
   const root = resolve('.runtime/mcp-unit')
@@ -51,6 +54,61 @@ test('freshness reconnects prepared data after the backend process loses its con
     await runtime.ensureConnected()
     connected = false
     assert.equal((await runtime.getFreshness()).mode, 'snapshot')
+    assert.equal(opens, 2)
+  } finally {
+    await runtime.close()
+    rmSync(userData, { recursive: true, force: true })
+  }
+})
+
+test('a real backend exit clears the cached connection and the next read starts a new backend', async () => {
+  const root = resolve('.runtime/mcp-unit')
+  mkdirSync(root, { recursive: true })
+  const destination = mkdtempSync(join(root, 'process-recovery-'))
+  const python = resolve('.venv/Scripts/python.exe')
+  const generated = spawnSync(python, ['python/tests/create_mcp_fixture.py', destination], {
+    encoding: 'utf8', env: { ...process.env, PYTHONPATH: resolve('python') },
+  })
+  assert.equal(generated.status, 0, generated.stderr)
+  const fixture = JSON.parse(generated.stdout)
+  const runtime = new McpRuntime({ userData: fixture.userDataPath, mode: 'snapshot' })
+  const tools = createTools(runtime)
+  try {
+    assert.equal((await tools.call('find_chats', { limit: 1 })).structuredContent.success, true)
+    const child = (runtime as any).backend.child
+    const exited = once(child, 'exit')
+    child.stdin.end()
+    await exited
+    assert.equal((runtime as any).connection, null)
+    assert.equal((await tools.call('find_chats', { limit: 1 })).structuredContent.success, true)
+    assert.notEqual((runtime as any).backend.child.pid, child.pid)
+  } finally {
+    await (runtime as any).backend.closeGracefully()
+    await tools.close()
+    rmSync(destination, { recursive: true, force: true })
+  }
+})
+
+test('a backend read timeout discards the cached connection before reopening prepared data', async () => {
+  const root = resolve('.runtime/mcp-unit')
+  mkdirSync(root, { recursive: true })
+  const userData = mkdtempSync(join(root, 'timeout-'))
+  writeFileSync(join(userData, 'WeFlow-config.json'), '{}')
+  const runtime = new McpRuntime({ userData, mode: 'snapshot' })
+  let opens = 0, disposed = 0
+  ;(runtime as any).backend = {
+    call: async (method: string) => {
+      if (method === 'getPreparedSelection') return { dataDir: root, accountId: 'wxid_me' }
+      if (method === 'openPreparedData') { opens++; return { accountId: 'wxid_me' } }
+      if (method === 'getConnectionStatus') return { state: 'ready', revision: 0 }
+      return { success: false, code: 'LIVE_READ_TIMEOUT', error: 'synthetic timeout' }
+    }, cancel: () => {}, dispose: () => { disposed++ },
+  }
+  try {
+    await runtime.ensureConnected()
+    await assert.rejects(runtime.call('getSessions'), { code: 'LIVE_READ_TIMEOUT', retryable: true })
+    assert.equal(disposed, 1)
+    await runtime.ensureConnected()
     assert.equal(opens, 2)
   } finally {
     await runtime.close()
