@@ -2,6 +2,8 @@
 
 本指南支持在线读取和离线副本。在线读取及 GUI 热加载的设计见 [新架构](live-architecture.md)、[接入规格](live-spec.md) 和 [完整方案](live-integration-plan.md)。
 
+若排查的是 MCP 断连，先参阅 [MCP 重启与可用性检查](mcp-usage.md#重启断连与可用性检查)：运行 `weflow-mcp.cmd --check` 验证入口和数据，再在实际 MCP 客户端重新连接并调用 `get_status`。MCP 使用客户端专属 stdio 管道，终端另开进程不能修复旧连接；已有准备状态完整时无需重新 prepare。
+
 推荐首次使用 `prepare --mode live --launch`：保持微信登录，在缓存完整后无需退出微信即可查询并打开原 GUI。需要固定副本时使用 `--mode snapshot`；下文的退出、decrypt 流程只用于 snapshot。命令不会替用户同意协议、解除应用锁或强制结束微信。
 
 ## 最短启动

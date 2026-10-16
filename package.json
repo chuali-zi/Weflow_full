@@ -19,6 +19,7 @@
     "build:mcp": "npm run typecheck:mcp && node scripts/build-mcp.cjs",
     "typecheck:mcp": "tsc --noEmit -p tsconfig.mcp.json",
     "test:mcp": "node scripts/test-mcp.cjs",
+    "fuzz:mcp": "npm run build:mcp && node scripts/fuzz-mcp.cjs",
     "check:mcp": "node scripts/check-mcp.cjs",
     "build:app": "npm run typecheck && node scripts/clean-dist-electron.cjs && vite build",
     "package:win": "node scripts/package-backend.cjs && npm run build:app && npm run build:mcp && electron-builder --win --x64 --publish never",

@@ -102,7 +102,7 @@ class FakeRuntime {
 const fixedRange = { start: '2026-09-01T00:00:00Z', end: '2026-10-04T00:00:00Z' }
 
 test('fresh reads retry transient failures once, while continuations and cancellations do not retry', async () => {
-  for (const code of ['BACKEND_EXITED', 'BACKEND_STOPPED', 'NOT_CONNECTED', 'LIVE_READ_TIMEOUT', 'CURSOR_STALE']) {
+  for (const code of ['BACKEND_EXITED', 'BACKEND_STOPPED', 'BACKEND_PROTOCOL_ERROR', 'NOT_CONNECTED', 'LIVE_READ_TIMEOUT', 'CURSOR_STALE']) {
     const runtime = new FakeRuntime(), call = runtime.call.bind(runtime)
     let attempts = 0
     runtime.call = async (method, payload) => {

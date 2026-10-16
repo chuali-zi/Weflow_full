@@ -50,6 +50,22 @@ MCP 服务会保持运行等待客户端请求；在终端直接执行入口时�
 
 客户端通过 stdio 启动 Node MCP，Node 再通过 stdin/stdout 按需启动 Python 后端，不需要启动 HTTP 服务或打开 GUI。后端退出会清除旧连接；读取超时会释放后端，下次连接重新打开已准备的数据。新的只读查询遇到后端退出、未连接、超时或读取期间版本变化时，会自动恢复并重试一次。旧游标失效后仍需重开原范围，文件导出不会自动重跑。Node MCP 本身退出后，需要由客户端重新建立 stdio 连接；单独在终端启动另一进程不能接回已有管道。
 
+## 重启、断连与可用性检查
+
+电脑重启或 MCP 主进程退出后，由 Agent 所用的 MCP 客户端重新连接 WeFlow。配置、已认证密钥和已准备快照保留在磁盘上；游标及服务内短引用属于内存状态，重启后要重读原范围，或通过导出的 `references_file` 恢复短引用。不要为恢复连接删除账号目录、配置或缓存。
+
+可在任意工作目录调用绝对路径入口进行一次性检查，使用与实际客户端相同的 `--user-data`、`--data-dir`、`--mode` 参数：
+
+```powershell
+& 'D:\wechat\tools\WeFlow-full\weflow-mcp.cmd' --check
+```
+
+`--check` 会创建临时 MCP 客户端，实际完成 stdio 握手、工具列表、`get_status` 和一次会话读取，再关闭自己的连接。stdout 只输出检查 JSON，不输出聊天正文或会话名称。只有全部完成才返回 `success: true` 和退出码 0；失败退出码为 1，并给出 `error.code` / `error.action`。单个请求上限 15 秒，整组检查上限 45 秒，关闭子进程还可能需要几秒。
+
+这证明当前入口与所选数据可用；实际 Agent 仍需在自己的 MCP 连接上调用 `get_status`。如果检查通过但 Agent 仍报管道断开，应在该客户端重新连接；终端另开后台进程或看到进程存在都不能证明旧连接已恢复。若检查失败，按返回动作处理配置、运行环境、账号或密钥问题，再检查，不要反复执行相同失败调用。
+
+`get_status` 只在数据状态为 `ready` 或可读的 `degraded` 时报告成功；后者仍可能缺少部分数据。`reconnecting`、`needs_key`、`disconnected` 不会报告成功。持续断连会返回错误和恢复动作，不会无限重连。
+
 ## 工具与调用顺序
 
 | 工具 | 用途 |
@@ -184,8 +200,11 @@ MCP 启动 `instructions` 和新工具说明均引导 Agent 优先使用上述�
 npm run typecheck:mcp
 npm run test:mcp
 npm run check:mcp
+npm run fuzz:mcp
 ```
 
 `check:mcp` 使用合成账号和官方 MCP 客户端，通过实际命令入口验证 stdio、11 个工具、优先工具引导、清洗读取与导出、短引用上下文、分页、重放、预算、长消息、紧凑批量读取、完整文件导出、查询、上下文、媒体状态和应用锁。测试数据留在 `.runtime/mcp-test`。不读取真实账号。
+
+`fuzz:mcp` 先构建当前源码，再用合成的 snapshot / live 账号验证异常参数、异常 JSON-RPC 报文、并发读取、后端强退、主进程强退、冷启动、旧游标失效、配置损坏与修复、`--check` 成功及失败退出码。仅结束本次创建的测试进程，不重启电脑、不关闭微信、不改真实 profile。测试会用 Windows CIM 查询测试主进程的直接子进程，受限环境需具备该查询权限。设置 `WEFLOW_FUZZ_SEED` 可重放不同的随机请求序列。后端畸形响应、卡住超时、持续断连和状态竞态的定向回归包含在 `test:mcp` 中。
 
 完整设计见 [架构](mcp-architecture.md)、[Spec](mcp-spec.md) 和 [PRD](mcp-prd.md)。

@@ -10,7 +10,7 @@ export type Connection = { accountId: string; accountScope: string; dataDir: str
 export type Freshness = { mode: 'live' | 'snapshot' | 'unconnected'; queried_at: string; connection_id: string | null; revision_start: number | null; revision_end: number | null; snapshot_id: string | null; captured_at: string | null; consistency: 'per_database' | 'fixed_snapshot' | 'unknown' }
 
 export function runtimeError(code: string, message: string, action?: string): Error & { code: string; action?: string; retryable: boolean } {
-  return Object.assign(new Error(message), { code, action, retryable: ['LIVE_READ_TIMEOUT', 'LIVE_BUSY', 'BACKEND_EXITED', 'BACKEND_STOPPED', 'NOT_CONNECTED', 'SOURCE_REPLACED'].includes(code) })
+  return Object.assign(new Error(message), { code, action, retryable: ['LIVE_READ_TIMEOUT', 'LIVE_BUSY', 'BACKEND_EXITED', 'BACKEND_STOPPED', 'BACKEND_PROTOCOL_ERROR', 'NOT_CONNECTED', 'SOURCE_REPLACED'].includes(code) })
 }
 export function defaultUserData(): string { return join(process.env.APPDATA || join(homedir(), 'AppData', 'Roaming'), 'WeFlow-full') }
 
@@ -53,6 +53,18 @@ export class McpRuntime {
 
   private invalidate(): void { for (const listener of this.listeners) listener() }
   onInvalidate(listener: () => void): () => void { this.listeners.add(listener); return () => this.listeners.delete(listener) }
+
+  private requireReady(status: Record<string, any>): void {
+    if (status?.state === 'ready' || status?.state === 'degraded') return
+    this.connection = null
+    this.connectionId = null
+    this.revision = null
+    this.invalidate()
+    if (status?.state === 'needs_key') {
+      throw runtimeError('KEY_NOT_FOUND', '在线数据所需密钥不完整，连接尚未就绪。', '保持微信登录，使用同一配置和账号运行 WeFlow prepare --mode live，然后重试 get_status。')
+    }
+    throw runtimeError('NOT_CONNECTED', '本地数据连接尚未就绪。', '稍后重试 get_status；若仍失败，运行 weflow-mcp.cmd --check 并按返回错误修复。不要另外启动后台 MCP 进程。')
+  }
 
   checkProfile(): void {
     const file = join(this.options.userData, 'WeFlow-config.json')
@@ -105,8 +117,9 @@ export class McpRuntime {
       const owner = String(opened.accountId || selection.accountId || '')
       if (!owner || !selection.dataDir) throw runtimeError('ACCOUNT_REQUIRED', '无法确定已准备的微信账号。')
       const connection: Connection = { accountId: owner, accountScope: accountScope(owner), dataDir: selection.dataDir, mode, capturedAt: opened.capturedAt, snapshotId: opened.snapshotId }
-      this.connection = connection
       const status = await this.call<any>('getConnectionStatus', {}, signal)
+      this.requireReady(status)
+      this.connection = connection
       this.connectionId = status.connectionId || null
       this.revision = typeof status.revision === 'number' ? status.revision : null
       return connection
@@ -115,14 +128,15 @@ export class McpRuntime {
   }
 
   async getFreshness(signal?: AbortSignal): Promise<Freshness> {
-    const connection = await this.ensureConnected(signal)
-    const status = await this.call<any>('getConnectionStatus', {}, signal)
-    if (status.state === 'disconnected') {
+    let connection = await this.ensureConnected(signal)
+    let status = await this.call<any>('getConnectionStatus', {}, signal)
+    if (status?.state === 'disconnected') {
       this.connection = null
       this.invalidate()
-      await this.ensureConnected(signal)
-      return this.getFreshness(signal)
+      connection = await this.ensureConnected(signal)
+      status = await this.call<any>('getConnectionStatus', {}, signal)
     }
+    this.requireReady(status)
     const revision = typeof status.revision === 'number' ? status.revision : null
     const connectionId = status.connectionId || null
     if (this.connectionId !== connectionId || this.revision !== revision) this.invalidate()
@@ -135,15 +149,17 @@ export class McpRuntime {
       const connection = await this.ensureConnected(signal)
       const freshness = await this.getFreshness(signal)
       const state = await this.call<any>('getConnectionStatus', {}, signal)
+      this.requireReady(state)
       return { schema_version: '1', success: true, account: { id: connection.accountScope, self_id: personId(connection.accountScope, connection.accountId) }, timezone: this.timezone,
         data: { state: state.state, configured_account: connection.accountScope, self: personId(connection.accountScope, connection.accountId), mode_selection_source: this.modeSource,
           capabilities: { text: true, quotes: true, compact_messages: true, message_export: 'local_files', local_images: 'on_demand', live: connection.mode === 'live', complete_group_members: false, voice_transcription: false, ocr: false }, recovery_actions: [] },
         coverage: null, freshness, warnings: [], error: null }
     } catch (caught) {
       const error = caught as Error & { code?: string; action?: string; retryable?: boolean }
-      return { schema_version: '1', success: false, account: null, timezone: this.timezone, data: { state: 'unconnected', recovery_actions: error.action ? [error.action] : [] }, coverage: null,
+      const action = error.action || '检查 WeFlow 的账号准备与配置；修复后重试 get_status。'
+      return { schema_version: '1', success: false, account: null, timezone: this.timezone, data: { state: 'unconnected', recovery_actions: [action] }, coverage: null,
         freshness: { mode: 'unconnected', queried_at: new Date().toISOString(), connection_id: null, revision_start: null, revision_end: null, snapshot_id: null, captured_at: null, consistency: 'unknown' }, warnings: [],
-        error: { code: error.code || 'BACKEND_ERROR', message: error.message, retryable: !!error.retryable, action: error.action || '检查 WeFlow 的账号准备与配置。' } }
+        error: { code: error.code || 'BACKEND_ERROR', message: error.message, retryable: !!error.retryable, action } }
     }
   }
 

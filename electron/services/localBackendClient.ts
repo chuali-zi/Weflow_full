@@ -48,7 +48,9 @@ export class LocalBackendClient {
       backendRoot && join(backendRoot, '../.venv/bin/python')]
     const interpreter = pythonCandidates.find((candidate) => candidate && existsSync(candidate))
     if (!frozen && (!backendRoot || !interpreter)) {
-      throw new Error('内置后端尚未安装。请使用项目根目录的“启动 WeFlow.cmd”启动。')
+      throw Object.assign(new Error('内置后端尚未安装。请使用项目根目录的“启动 WeFlow.cmd”准备运行环境。'), {
+        code: 'BACKEND_UNAVAILABLE', retryable: false, action: '修复本机 Python / 后端运行环境后，在 MCP 客户端重新连接 WeFlow。',
+      })
     }
     const child = spawn(frozen ? bundled! : interpreter!, frozen
       ? ['--state-dir', this.stateDir]
@@ -60,8 +62,10 @@ export class LocalBackendClient {
     this.child = child
     const lines = createInterface({ input: child.stdout })
     lines.on('line', (line) => {
+      if (this.child !== child) return
       let event: any
       try { event = JSON.parse(line) } catch { return }
+      if (!event || typeof event !== 'object' || Array.isArray(event)) return
       if (event && event.type !== 'progress' && typeof event.type === 'string' && event.id === undefined) {
         for (const listener of this.eventListeners) {
           try { listener(event) } catch { /* event consumers must not break transport */ }
@@ -74,6 +78,10 @@ export class LocalBackendClient {
       }
       const entry = this.pending.get(event.id)
       if (!entry) return
+      if (!Object.prototype.hasOwnProperty.call(event, 'result')) {
+        fail(Object.assign(new Error('内置后端返回了无效响应，可重试读取。'), { code: 'BACKEND_PROTOCOL_ERROR', retryable: true }))
+        return
+      }
       this.pending.delete(event.id)
       clearTimeout(entry.timer)
       entry.resolve(event.result)
@@ -88,11 +96,12 @@ export class LocalBackendClient {
       }
       this.pending.clear()
       lines.close()
-      this.disconnected('BACKEND_EXITED')
+      this.disconnected((error as Error & { code?: string }).code || 'BACKEND_EXITED')
+      if (child.exitCode === null && child.signalCode === null) child.kill()
     }
     child.on('error', () => fail(Object.assign(new Error('内置后端启动失败，请检查本地运行环境。'), { code: 'BACKEND_EXITED', retryable: true })))
     child.on('exit', (code) => fail(Object.assign(new Error(`内置后端已退出（${code ?? '中断'}），可重试读取。`), { code: 'BACKEND_EXITED', retryable: true })))
-    child.stdin.on('error', () => {})
+    child.stdin.on('error', () => fail(Object.assign(new Error('内置后端管道已断开，可重试读取。'), { code: 'BACKEND_EXITED', retryable: true })))
   }
   call<T = any>(method: string, payload: Record<string, any> = {}, progress?: (message: string) => void, requestId?: number, options?: { timeoutMs?: number; signal?: AbortSignal }): Promise<T> {
     if (options?.signal?.aborted) return Promise.reject(Object.assign(new Error('操作已取消。'), { code: 'CANCELLED' }))
@@ -115,7 +124,7 @@ export class LocalBackendClient {
         this.pending.delete(id)
         cleanup()
         this.cancel(id)
-        entry.reject(Object.assign(new Error('记录处理超时，请重新尝试。'), { code: 'LIVE_READ_TIMEOUT' }))
+        entry.reject(Object.assign(new Error('记录处理超时，请重新尝试。'), { code: 'LIVE_READ_TIMEOUT', retryable: true }))
         this.dispose()
       }, options?.timeoutMs ?? 30 * 60_000)
       this.pending.set(id, { resolve: value => { cleanup(); resolvePromise(value) }, reject: error => { cleanup(); reject(error) }, timer, progress })
