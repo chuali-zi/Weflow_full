@@ -50,6 +50,10 @@ import { imageDownloadService } from './services/imageDownloadService'
 import { getAIProviderCatalog, listModelsFromProvider, resolveAIModelMetadata } from './services/aiProviderCatalog'
 import { electronNetProxy } from './services/electronNetProxy'
 import { RelayOneService } from './services/relayOneService'
+import { McpClientSetupService } from './services/mcpClientSetup'
+import { LocalBackendClient } from './services/localBackendClient'
+import { buildMcpLaunch } from '../shared/mcpLaunch'
+import type { McpClientTarget } from '../shared/mcpSetup'
 
 function traceKeyFlow(stage: string, data?: unknown): void {
   try {
@@ -2451,6 +2455,33 @@ function registerIpcHandlers() {
     relayOneService.createOrder(input)
   ))
   ipcMain.handle('relayone:getOrder', async (_, orderId: number) => relayOneService.getOrder(orderId))
+
+  const mcpSetup = new McpClientSetupService({
+    userData: app.getPath('userData'),
+    context: async () => {
+      const cfg = configService || new ConfigService()
+      const profile = app.getPath('userData')
+      const sourceRoot = app.isPackaged ? undefined : app.getAppPath()
+      const account = String(cfg.get('myAccountId') || '').trim()
+      const dataDir = cfg.getAccountDir(String(cfg.get('dbPath') || ''), account) || undefined
+      const launchInput = { executable: process.execPath, userData: profile, sourceRoot,
+        serverPath: sourceRoot ? join(sourceRoot, 'build', 'mcp', 'server.cjs') : join(process.resourcesPath, 'mcp', 'server.cjs'),
+        resourcesPath: app.isPackaged ? process.resourcesPath : undefined }
+      const backend = new LocalBackendClient(join(profile, 'backend'), process.resourcesPath, !app.isPackaged, buildMcpLaunch(launchInput).env)
+      let selection: any
+      try {
+        selection = await backend.call('getPreparedSelection', { ...(dataDir ? { dataDir } : {}) }, undefined, undefined, { timeoutMs: 15000 })
+        if (selection?.success === false) throw new Error(selection.error || '请先在数据库连接中准备微信账号。')
+      } finally { backend.dispose() }
+      const mode = selection?.savedMode === 'snapshot' ? 'snapshot' as const : 'live' as const
+      return { profile, mode, account: account || String(selection?.accountId || ''),
+        launch: buildMcpLaunch({ ...launchInput, dataDir: dataDir || selection?.dataDir, mode }) }
+    },
+  })
+  ipcMain.handle('mcpSetup:inspect', (_, target: McpClientTarget) => mcpSetup.inspect(target))
+  ipcMain.handle('mcpSetup:install', (_, target: McpClientTarget) => mcpSetup.install(target))
+  ipcMain.handle('mcpSetup:check', (_, target: McpClientTarget, name: string) => mcpSetup.check(target, name))
+  ipcMain.handle('mcpSetup:remove', (_, target: McpClientTarget, name: string) => mcpSetup.remove(target, name))
 
   ipcMain.handle('agent:getDebugLogInfo', async () => {
     const directory = join(app.getPath('userData'), 'logs', 'agent-runs')

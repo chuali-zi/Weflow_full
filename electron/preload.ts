@@ -8,6 +8,12 @@ type CloseConfirmPayload = {
 // 暴露给渲染进程的 API
 contextBridge.exposeInMainWorld('electronAPI', {
   // 配置
+  mcpSetup: {
+    inspect: (target: unknown) => ipcRenderer.invoke('mcpSetup:inspect', target),
+    install: (target: unknown) => ipcRenderer.invoke('mcpSetup:install', target),
+    check: (target: unknown, name: string) => ipcRenderer.invoke('mcpSetup:check', target, name),
+    remove: (target: unknown, name: string) => ipcRenderer.invoke('mcpSetup:remove', target, name),
+  },
   config: {
     get: (key: string) => ipcRenderer.invoke('config:get', key),
     set: (key: string, value: any) => ipcRenderer.invoke('config:set', key, value),

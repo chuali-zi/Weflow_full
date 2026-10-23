@@ -13,6 +13,7 @@
 | [MCP 架构设计](mcp-architecture.md) | 独立 MCP 进程、现有后端复用、查询与媒体模块、运行和打包路线。 |
 | [MCP 实现规格](mcp-spec.md) | 7 个工具、参数/结果、标识与游标、覆盖/错误、后端扩展和验收要求。 |
 | [MCP 使用说明](mcp-usage.md) | 准备账号、客户端配置、调用顺序和开发验证命令。 |
+| [图形化 MCP 接入](mcp-client-setup.md) | Codex / Claude Code 一键接入、验证、修复、移除与环境测试。 |
 | [MCP 实现验证](mcp-validation.md) | 已执行的源码/Windows 包内联调、回归结果和验证边界。 |
 | [本地解密接入说明](integrated-backend.md) | 密钥认证、快照、原 WeFlow 接口接入位置、验证结果和当前能力范围。 |
 | [wxtext 架构](wxtext-architecture.md) | 密钥扫描、SQLCipher、WAL 与后端实现的技术说明。 |

@@ -19,7 +19,8 @@ export class LocalBackendClient {
     progress?: (message: string) => void
   }>()
   private eventListeners = new Set<(event: LocalBackendEvent) => void>()
-  constructor(private stateDir: string, private resourcesPath = '', private preferSource = false) {}
+  constructor(private stateDir: string, private resourcesPath = '', private preferSource = false,
+    private runtimeEnv?: Record<string, string>) {}
 
   onEvent(listener: (event: LocalBackendEvent) => void): () => void {
     this.eventListeners.add(listener)
@@ -32,8 +33,9 @@ export class LocalBackendClient {
   }
   private start(): void {
     if (this.child) return
+    const environment = { ...process.env, ...this.runtimeEnv }
     const resources = this.resourcesPath || (process as NodeJS.Process & { resourcesPath?: string }).resourcesPath || ''
-    const candidates = [process.env.WEFLOW_BACKEND_ROOT, join(resources, 'python'),
+    const candidates = [environment.WEFLOW_BACKEND_ROOT, join(resources, 'python'),
       resolve(__dirname, '../python'), resolve(__dirname, '../../python'), join(process.cwd(), 'python')]
     const backendRoot = candidates.find((candidate) => candidate && existsSync(join(candidate, 'weflow_backend', '__main__.py')))
     // Upstream callers pass resources/resources; our backend is resources/backend.
@@ -42,7 +44,7 @@ export class LocalBackendClient {
       join((process as NodeJS.Process & { resourcesPath?: string }).resourcesPath || resources, 'backend', 'weflow-backend.exe')]
       .find((candidate) => existsSync(candidate))
     const frozen = Boolean(bundled) && !this.preferSource
-    const pythonCandidates = [process.env.WEFLOW_PYTHON,
+    const pythonCandidates = [environment.WEFLOW_PYTHON,
       backendRoot && join(backendRoot, '../.venv/Scripts/python.exe'),
       backendRoot && join(backendRoot, '../.runtime/python/python.exe'),
       backendRoot && join(backendRoot, '../.venv/bin/python')]
@@ -56,7 +58,7 @@ export class LocalBackendClient {
       ? ['--state-dir', this.stateDir]
       : ['-u', '-m', 'weflow_backend', '--state-dir', this.stateDir], {
       cwd: backendRoot || resources,
-      env: { ...process.env, PYTHONPATH: backendRoot, PYTHONIOENCODING: 'utf-8' },
+      env: { ...environment, PYTHONPATH: backendRoot, PYTHONIOENCODING: 'utf-8' },
       windowsHide: true, stdio: ['pipe', 'pipe', 'pipe']
     })
     this.child = child

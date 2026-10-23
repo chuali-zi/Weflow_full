@@ -21,6 +21,8 @@
     "test:mcp": "node scripts/test-mcp.cjs",
     "fuzz:mcp": "npm run build:mcp && node scripts/fuzz-mcp.cjs",
     "check:mcp": "node scripts/check-mcp.cjs",
+    "check:mcp-setup": "npm run build:mcp && node scripts/check-mcp-setup.cjs",
+    "check:mcp-setup-ui": "node scripts/check-mcp-setup-desktop.cjs",
     "build:app": "npm run typecheck && node scripts/clean-dist-electron.cjs && vite build",
     "package:win": "node scripts/package-backend.cjs && npm run build:app && npm run build:mcp && electron-builder --win --x64 --publish never",
     "test:backend": "node scripts/test-backend.cjs",
@@ -52,7 +54,8 @@
     "koffi": "^3.1.0",
     "sharp": "^0.35.3",
     "sherpa-onnx-node": "^1.13.3",
-    "silk-wasm": "^3.7.1"
+    "silk-wasm": "^3.7.1",
+    "smol-toml": "^1.9.1"
   },
   "devDependencies": {
     "@ai-sdk/anthropic": "^4.0.12",

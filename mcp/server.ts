@@ -6,6 +6,7 @@ import { TOOL_DEFINITIONS } from './contracts'
 import { createTools } from './tools'
 import { resolve, join } from 'node:path'
 import { checkServer } from './check'
+import { buildMcpLaunch } from '../shared/mcpLaunch'
 
 function parseOptions(argv: string[]): RuntimeOptions {
   const options: RuntimeOptions = { userData: defaultUserData() }
@@ -18,6 +19,14 @@ function parseOptions(argv: string[]): RuntimeOptions {
     ;(options as Record<string, unknown>)[key] = value
   }
   return options
+}
+
+function launchConfig(options: RuntimeOptions) {
+  const source = Boolean(process.env.WEFLOW_BACKEND_ROOT)
+  return buildMcpLaunch({ executable: process.execPath, serverPath: join(__dirname, 'server.cjs'),
+    userData: options.userData, dataDir: options.dataDir, mode: options.mode, timezone: options.timezone,
+    sourceRoot: source ? resolve(__dirname, '..', '..') : undefined,
+    resourcesPath: options.resourcesPath || (!source ? resolve(__dirname, '..') : undefined) })
 }
 
 export async function startServer(options: RuntimeOptions): Promise<void> {
@@ -56,24 +65,15 @@ if (require.main === module) {
     process.stderr.write('WeFlow MCP: weflow-mcp.cmd [--user-data DIR] [--data-dir DIR] [--mode live|snapshot] [--timezone IANA]\n--print-config 输出可复制的客户端配置。\n--check 使用临时 stdio 客户端验证握手和数据读取，输出 JSON 并退出。\n先用 WeFlow prepare 准备账号；MCP 不自动获取密钥或创建副本。\n')
   } else if (process.argv.includes('--check')) {
     const args = process.argv.slice(2).filter(value => value !== '--check')
-    parseOptions(args)
-    void checkServer(join(__dirname, 'server.cjs'), args).then(result => {
+    void Promise.resolve().then(() => checkServer(launchConfig(parseOptions(args)))).then(result => {
       process.stdout.write(JSON.stringify(result) + '\n')
       process.exitCode = result.success ? 0 : 1
     }).catch(() => { process.stderr.write('MCP 检查未能完成。\n'); process.exitCode = 1 })
   } else if (process.argv.includes('--print-config')) {
     const args = process.argv.slice(2).filter(value => value !== '--print-config')
     const options = parseOptions(args)
-    const projectRoot = resolve(__dirname, '..', '..')
-    const source = Boolean(process.env.WEFLOW_BACKEND_ROOT)
-    process.stdout.write(JSON.stringify({ mcpServers: { weflow: {
-      command: process.execPath,
-      args: [join(__dirname, 'server.cjs'), ...args],
-      env: { ELECTRON_RUN_AS_NODE: '1',
-        WEFLOW_MCP_ASSETS: __dirname,
-        WEFLOW_BACKEND_ROOT: source ? join(projectRoot, 'python') : '',
-        ...(!source && { NODE_PATH: `${join(options.resourcesPath || resolve(__dirname, '..'), 'app.asar', 'node_modules')};${join(options.resourcesPath || resolve(__dirname, '..'), 'app.asar.unpacked', 'node_modules')}` }) }
-    } } }, null, 2) + '\n')
+    const config = launchConfig(options)
+    process.stdout.write(JSON.stringify({ mcpServers: { weflow: config } }, null, 2) + '\n')
   } else {
     void startServer(parseOptions(process.argv.slice(2))).catch(() => {
       process.stderr.write('WeFlow MCP 启动失败，请检查参数、运行环境和 build:mcp 输出。\n')

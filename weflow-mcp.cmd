@@ -1,5 +1,10 @@
 @echo off
 setlocal
+set "NODE_OPTIONS="
+set "NODE_PATH="
+set "PYTHONHOME="
+set "PYTHONPATH="
+set "WEFLOW_PYTHON="
 if exist "%~dp0resources\mcp\server.cjs" (
   set ELECTRON_RUN_AS_NODE=1
   set "WEFLOW_MCP_ASSETS=%~dp0resources\mcp"
@@ -8,5 +13,5 @@ if exist "%~dp0resources\mcp\server.cjs" (
   "%~dp0WeFlow.exe" "%~dp0resources\mcp\server.cjs" --resources-path "%~dp0resources" %*
   exit /b
 )
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0scripts\mcp.ps1" %*
+"%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -ExecutionPolicy Bypass -File "%~dp0scripts\mcp.ps1" %*
 exit /b %errorlevel%

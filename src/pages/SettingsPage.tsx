@@ -21,6 +21,7 @@ import { Avatar } from '../components/Avatar'
 import AIProviderLogo from '../components/ai/AIProviderLogo'
 import AIThemedPicker from '../components/ai/AIThemedPicker'
 import RelayOneGuide from '../components/ai/RelayOneGuide'
+import McpSetupPanel from '../components/McpSetupPanel'
 import ErrorReferenceLink from '../components/ErrorReferenceLink'
 import { getAIProviders, type AIModelMetadataResolution, type AIProviderInfo, type AIProviderProtocol } from '../types/ai'
 import { formatAIModelDisplayName } from '../utils/aiModelDisplay'
@@ -41,6 +42,7 @@ type SettingsTab =
   | 'models'
   | 'cache'
   | 'api'
+  | 'mcp'
   | 'updates'
   | 'security'
   | 'about'
@@ -61,6 +63,7 @@ const tabs: { id: Exclude<SettingsTab, 'insight' | 'aiFootprint' | 'aiMessageIns
   { id: 'autoDownload', label: '自动下载', icon: Download },
   { id: 'cache', label: '缓存', icon: HardDrive },
   { id: 'api', label: 'API 服务', icon: Globe },
+  { id: 'mcp', label: 'MCP 接入', icon: Plug },
   { id: 'analytics', label: '分析', icon: BarChart2 },
   { id: 'security', label: '安全', icon: ShieldCheck },
   { id: 'updates', label: '版本更新', icon: RefreshCw },
@@ -6373,6 +6376,7 @@ JSON 输出格式：
             {activeTab === 'models' && renderModelsTab()}
             {activeTab === 'cache' && renderCacheTab()}
             {activeTab === 'api' && renderApiTab()}
+            {activeTab === 'mcp' && <McpSetupPanel />}
             {activeTab === 'aiCommon' && renderAiCommonTab()}
             {activeTab === 'insight' && renderInsightTab()}
             {activeTab === 'aiFootprint' && renderAiFootprintTab()}

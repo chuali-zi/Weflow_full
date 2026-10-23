@@ -1,4 +1,5 @@
 import type { ChatSession, Message, Contact, ContactInfo, ChatRecordItem } from './models'
+import type { McpClientTarget, McpSetupResult } from '../../shared/mcpSetup'
 
 
 export interface SessionChatWindowOpenOptions {
@@ -480,6 +481,12 @@ export interface RelayOneOrderInfo {
 }
 
 export interface ElectronAPI {
+  mcpSetup: {
+    inspect: (target: McpClientTarget) => Promise<McpSetupResult>
+    install: (target: McpClientTarget) => Promise<McpSetupResult>
+    check: (target: McpClientTarget, name: string) => Promise<McpSetupResult>
+    remove: (target: McpClientTarget, name: string) => Promise<McpSetupResult>
+  }
   window: {
     minimize: () => void
     maximize: () => void

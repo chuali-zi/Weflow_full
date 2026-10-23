@@ -20,6 +20,8 @@
 
 安装与客户端接入见 [installed.md](https://github.com/chuali-zi/Weflow_full/blob/main/installed.md)；工具调用和读取限制见 [MCP 使用说明](docs/mcp-usage.md)。CLI 的完整命令、JSON 输出和退出码见 [CLI 使用说明](docs/cli.md)。
 
+当前 GUI 的 **设置 → MCP 接入** 支持一键配置 Codex、Claude Code，并提供验证、修复与移除；使用当前已准备的账号和读取模式。支持范围和环境验证见 [图形化 MCP 接入](docs/mcp-client-setup.md)。
+
 ## 接入范围
 
 | 能力 | 当前范围 |
