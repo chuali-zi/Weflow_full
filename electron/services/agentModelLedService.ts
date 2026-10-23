@@ -156,7 +156,7 @@ import {
   isRetryableAgentTransportError,
   waitForAgentTransportRetry,
 } from './agentRetryPolicy'
-import { initialAgentToolNames, resolveAgentToolRequest } from './agentToolCatalog'
+import { agentDataSourceGuidance, initialAgentToolNames, resolveAgentToolRequest } from './agentToolCatalog'
 import { explicitlyRequestsWebSearch, shouldRequireAgentWebSearch } from './agentWebSearchPolicy'
 
 const AGENT_EXPLICIT_MEDIA_READ_MAX_RECOVERY_STEPS = 3
@@ -317,7 +317,7 @@ type AgentRawMessageRangeRequest = {
 }
 
 const MODEL_LED_POLICY_VERSION = 'model-led-v1'
-const MODEL_LED_PROMPT_VERSION = 'model-led-model-owned-research-v412'
+const MODEL_LED_PROMPT_VERSION = 'model-led-model-owned-research-v413'
 const MODEL_LED_ROLE_VERSION = 'investigator-v1'
 const AGENT_TIMELINE_MONTH_SCAN_MAX_MONTHS = 48
 const AGENT_TIMELINE_MONTH_SCAN_MIN_TOKENS = 700
@@ -6925,8 +6925,7 @@ export class AgentService {
       .sort((left, right) => left.startedAt - right.startedAt)
     let restoredResumeRawPageCount = 0
 
-    // 保持首次请求精简。对于已知的单个本地会话，额外提供一种宽范围原文阅读能力，
-    // 使调查无需先经过能力加载轮次即可开始；其他所有能力仍保持懒加载。
+    // 首轮直接展示聊天目录和原文入口，其余能力按需加载。
     const allTools = tools
     const allToolNames = Object.keys(allTools).sort()
     const availableToolNames = [...allToolNames, 'request_tools']
@@ -7170,6 +7169,7 @@ export class AgentService {
       .summarizeForConversation(options.conversationId)
     const stableSystem = [
       '你是 WeFlow 助手。忠实回应用户当前明确表达的目标，不替用户补写或扩展任务。若用户没有提出需要调查的目标，就自然回应已有内容；意图不足以确定时可以简短询问，而不是自行设定调查对象或验证目标。',
+      agentDataSourceGuidance(source),
       '用户问题中形如 @显示名[sessionId] 的内容是位于原句当前位置的会话引用。必须按它与前后文字的关系理解每个引用分别承担的用途，并使用对应 sessionId 读取；不要把多个行内引用降格成无差别的范围列表，也不要向用户暴露方括号内的内部标识。',
       '先判断仅凭当前对话是否足以作答。足够时直接回答，不调用工具；只有答案依赖对话之外的事实或材料时，才按需加载能够取得该证据的最少工具。工具可用不等于有必要调用。',
       '需要调查时，可以先给出简短、面向用户的当前判断或核对说明，并在同一轮继续调用工具；获得新证据后也可以先报告阶段性结果再继续。不要把内部计划或协议字段暴露给用户，也不要把未经核验的推测冒充事实。当用户明确要求猜测、估计、预测、排序或在不确定条件下给出最佳判断时，应结合现有上下文和必要材料给出具体的 best-effort 结果，明确说明不确定性和依据；只要存在合理判断空间，就不能用泛化追问代替用户要求的答案。',

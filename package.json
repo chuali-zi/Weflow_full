@@ -24,6 +24,7 @@
     "build:app": "npm run typecheck && node scripts/clean-dist-electron.cjs && vite build",
     "package:win": "node scripts/package-backend.cjs && npm run build:app && npm run build:mcp && electron-builder --win --x64 --publish never",
     "test:backend": "node scripts/test-backend.cjs",
+    "test:agent": "node scripts/test-agent.cjs",
     "check:desktop": "node scripts/check-desktop.cjs",
     "check:live": "node scripts/check-live-desktop.cjs",
     "check:startup": "node scripts/check-chat-startup.cjs",
