@@ -13,7 +13,7 @@ import { ConversationTools, conversationRef } from '../mcp/conversation'
 
 test('MCP publishes the reading tools and bulk export with closed input objects', () => {
   assert.deepEqual(TOOL_DEFINITIONS.map(tool => tool.name), [
-    'get_status', 'find_chats', 'get_chat_overview', 'read_messages', 'search_messages', 'get_message_context', 'get_media', 'export_messages',
+    'get_status', 'get_group_members', 'find_chats', 'get_chat_overview', 'read_messages', 'search_messages', 'get_message_context', 'get_media', 'export_messages',
     'read_conversation', 'export_conversation', 'get_conversation_context',
   ])
   for (const tool of TOOL_DEFINITIONS) {

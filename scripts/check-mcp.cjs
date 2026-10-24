@@ -46,7 +46,7 @@ async function main() {
   try {
     await client.connect(transport);
     const listed = await client.listTools();
-    assert.deepEqual(listed.tools.map(x => x.name), ['get_status', 'find_chats', 'get_chat_overview', 'read_messages', 'search_messages', 'get_message_context', 'get_media', 'export_messages', 'read_conversation', 'export_conversation', 'get_conversation_context']);
+    assert.deepEqual(listed.tools.map(x => x.name), ['get_status', 'get_group_members', 'find_chats', 'get_chat_overview', 'read_messages', 'search_messages', 'get_message_context', 'get_media', 'export_messages', 'read_conversation', 'export_conversation', 'get_conversation_context']);
     assert.match(client.getInstructions(), /Prefer read_conversation/);
     const status = await read('get_status', {});
     assert.equal(status.freshness.mode, mode);
@@ -54,6 +54,17 @@ async function main() {
     const found = await read('find_chats', { query: '工作群', kind: 'group' });
     assert.ok(found.data.chats.length >= 2, 'same-name groups remain separate candidates');
     const chat = found.data.chats.find(c => c.has_local_messages) || found.data.chats[0];
+    assert.equal(status.data.capabilities.complete_group_members, true);
+    const roster = await read('get_group_members', { chat_id: chat.id, limit: 2 });
+    assert.deepEqual(roster.data.summary, { total: 4, set: 2, not_set: 1, unknown: 1 });
+    assert.equal(roster.coverage.has_more, true);
+    const rosterNext = await read('get_group_members', { cursor: roster.coverage.next_cursor });
+    assert.equal(rosterNext.coverage.has_more, false);
+    assert.deepEqual(await read('get_group_members', { cursor: roster.coverage.next_cursor }), rosterNext);
+    assert.equal(rosterNext.data.members[0].nickname, '安静同学');
+    const unset = await read('get_group_members', { chat_id: chat.id, nickname_status: 'not_set' });
+    assert.equal(unset.data.members.length, 1);
+    assert.equal(unset.data.members[0].group_nickname, '');
     const range = { start: '2000-01-01T00:00:00Z', end: new Date(Date.now() + 60000).toISOString() };
     let page = await read('read_messages', { chat_ids: [chat.id], range, limit: 1, max_chars: 4000 });
     const messages = [...page.data.messages];

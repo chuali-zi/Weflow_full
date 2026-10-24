@@ -72,6 +72,7 @@ MCP 服务会保持运行等待客户端请求；在终端直接执行入口时�
 | --- | --- |
 | `get_status` | 查看账号准备、读取模式、数据时间和媒体能力。 |
 | `find_chats` | 按备注、昵称或账号找群聊/私聊，返回稳定 ID；同名会话保持为多个候选。 |
+| `get_group_members` | 列出完整本机群成员名单、微信昵称、联系人备注和群昵称，筛选已设置/未设置/未知，统计全群人数。 |
 | `get_chat_overview` | 查看选定范围的数量、类型和日期桶，决定下一步读取范围。 |
 | `read_messages` | 按会话、时间和发送者读取原文，有序分页。 |
 | `search_messages` | 在正文、引用和附件标题中搜索字面词，返回命中及上下文锚点。 |
@@ -81,6 +82,22 @@ MCP 服务会保持运行等待客户端请求；在终端直接执行入口时�
 | `read_conversation` | 优先用于阅读和分析；提供清洗后的原文和短消息引用。 |
 | `export_conversation` | 大范围阅读时优先使用；导出易读 TXT、精简 JSONL 和独立定位映射。 |
 | `get_conversation_context` | 根据短引用补读前后消息和引用；可显式取得原 ID 以调用媒体工具。 |
+
+## 检查同学是否设置群备注
+
+先用 `find_chats` 找到群，再将群 ID 传给 `get_group_members`：
+
+```json
+{ "chat_id": "find_chats 返回的群 ID", "nickname_status": "all", "limit": 500 }
+```
+
+每名成员返回稳定的 `person_id`、微信昵称 `nickname`、你给联系人的备注 `contact_remark`、成员在该群设置的昵称 `group_nickname`（通常所说的“群备注”），以及 `group_nickname_status`。名单来自 `contact.db` 的群成员表，包括没有发过言的成员。
+
+`nickname_status` 可选 `all`（默认）、`set`、`not_set`、`unknown`。`set` 表示明确设置了非空群昵称；`not_set` 表示成员资料里没有设置群昵称；`unknown` 表示资料缺失或解析失败，不计入未设置。联系人备注与群昵称分别返回；即使群昵称和微信昵称相同，只要明确设置过仍归入 `set`。`summary` 的 `total/set/not_set/unknown` 始终统计全群，`matched_count` 表示筛选后的人数。
+
+默认每页 500 人，可通过 `limit` 设置 1–10000 人。若 `coverage.has_more` 为真，使用同一工具仅传 `{"cursor":"coverage.next_cursor"}` 继续读取，直到结束。缺少成员表、群资料或名单不完整时返回错误，不会用聊天发言者补成全体成员。
+
+“已设置”不等于符合“学号＋姓名”等格式，也不能证明曾在某个时间修改过；可由调用方按用户提供的格式检查当前值。成员和昵称反映本机数据库的资料，时间信息见 `freshness`；快照模式应先确认快照时间。新增工具需要客户端重新连接 MCP 后才会出现在工具列表中。
 
 ## 优先使用清洗工具
 

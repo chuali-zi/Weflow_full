@@ -323,12 +323,67 @@ async function verifiedFreshness(runtime: Runtime, start: Freshness, signal?: Ab
 
 export async function getStatus(runtime: Runtime, signal?: AbortSignal) { return runtime.getStatus(signal) }
 
+export async function getGroupMembers(runtime: Runtime, args: any, signal?: AbortSignal): Promise<ToolData> {
+  checkCursorArgs(args)
+  const conn = await runtime.ensureConnected(signal), fresh = await runtime.getFreshness(signal)
+  let token = args.cursor
+  if (!token) {
+    const sessionId = decodeChatId(args.chat_id, conn.accountScope)
+    if (!sessionId.endsWith('@chatroom')) throw fail('INVALID_ARGUMENT', 'chat_id 必须是群聊 ID。')
+    const response = await runtime.call('getGroupMembers', { chatroomId: sessionId }, signal, 10000)
+    if (!response?.success || !Array.isArray(response.members)) throw fail('GROUP_MEMBERS_UNAVAILABLE', '无法读取群成员名单。')
+    const members = response.members.map((member: any) => ({
+      person_id: personId(conn.accountScope, member.username),
+      nickname: member.nickname || null,
+      contact_remark: member.remark || null,
+      group_nickname: member.groupNickname ?? null,
+      group_nickname_status: member.groupNicknameState || 'unknown',
+      is_self: member.username === conn.accountId,
+    }))
+    const summary = { total: members.length, set: 0, not_set: 0, unknown: 0 }
+    for (const member of members) {
+      const status = member.group_nickname_status as 'set' | 'not_set' | 'unknown'
+      summary[status]++
+    }
+    const status = args.nickname_status || 'all'
+    const items = members.filter((member: any) => status === 'all' || member.group_nickname_status === status)
+    const freshness = await verifiedFreshness(runtime, fresh, signal)
+    token = cursors.start({ tool: 'get_group_members', chatId: args.chat_id, items, matchedCount: items.length, index: 0, limit: args.limit ?? 500, status, summary, freshness }, versionKey(freshness))
+  }
+  const page = await cursors.advance<any, any>(token, versionKey(fresh), async state => {
+    if (state.tool !== 'get_group_members') throw fail('INVALID_ARGUMENT', '请使用创建该游标的同一工具续读。')
+    const start = state.index
+    state.index = Math.min(state.items.length, start + state.limit)
+    return { state, hasMore: state.index < state.items.length, value: { ...state, members: state.items.slice(start, state.index), items: undefined } }
+  })
+  const value = page.value
+  const coverage: Coverage = {
+    requested_scope: { chat_id: value.chatId, nickname_status: value.status },
+    progress: [{ chat_id: value.chatId, state: 'complete', member_count: value.summary.total }],
+    scope_progress: { selected_chats: 1, completed_chats: 1, remaining_chats: 0 },
+    scan_complete: true, returned_count: value.members.length, has_more: !!page.next, next_cursor: page.next,
+    truncated: false, omissions: [], unresolved_content: { group_nicknames: value.summary.unknown },
+  }
+  const result = dataResult(runtime, conn, value.freshness, {
+    chat_id: value.chatId, members: value.members, summary: value.summary, matched_count: value.matchedCount,
+    source: 'contact.chatroom_member',
+  }, coverage, value.members.length)
+  if (value.summary.unknown) result.warnings.push({ code: 'GROUP_NICKNAME_UNKNOWN', message: '部分成员的群昵称资料缺失或无法解析，不能判作未设置。', count: value.summary.unknown })
+  result.warnings.push({ code: 'LOCAL_GROUP_DATA', message: '名单与群昵称来自本机数据库；请结合 freshness 判断时效。set 仅表示已设置，不证明符合指定格式或曾经修改。' })
+  return result
+}
+
 export async function findChats(runtime: Runtime, args: any, signal?: AbortSignal): Promise<ToolData> {
   checkCursorArgs(args)
   const conn = await runtime.ensureConnected(signal); const fresh = await runtime.getFreshness(signal)
   let filtered: any[], index: number, limit: number, selectedQuery: string
   if (args.cursor) {
-    const tokenState = await cursors.advance<any, any>(args.cursor, versionKey(fresh), async s => { const start = s.index; s.index = Math.min(s.items.length, start + s.limit); return { state: s, hasMore: s.index < s.items.length, value: { items: s.items.slice(start, s.index), index: s.index, total: s.items.length, scope: s.scope, freshness: s.freshness } } })
+    const tokenState = await cursors.advance<any, any>(args.cursor, versionKey(fresh), async s => {
+      if (s.tool !== 'find_chats') throw fail('INVALID_ARGUMENT', '请使用创建该游标的同一工具续读。')
+      const start = s.index
+      s.index = Math.min(s.items.length, start + s.limit)
+      return { state: s, hasMore: s.index < s.items.length, value: { items: s.items.slice(start, s.index), index: s.index, total: s.items.length, scope: s.scope, freshness: s.freshness } }
+    })
     filtered = tokenState.value.items; index = tokenState.value.index - filtered.length; limit = filtered.length || 10; selectedQuery = ''
     const chats = filtered.map((x: any) => ({ id: chatId(conn.accountScope, x.raw), kind: x.kind, display_name: x.row.remark || x.row.nick_name || x.raw, remark: x.row.remark || null, alias: x.row.alias || null, match_basis: x.exact ? 'exact' : x.query ? 'partial' : 'recent_activity', last_activity: x.activeAt ? new Date(x.activeAt*1000).toISOString() : null, has_local_messages: !!x.activity }))
     const coverage = { requested_scope: tokenState.value.scope, progress: [], scope_progress: { selected_chats: tokenState.value.total, completed_chats: tokenState.value.total, remaining_chats: 0 }, scan_complete: true, returned_count: chats.length, has_more: !!tokenState.next, next_cursor: tokenState.next, truncated: false, omissions: [], unresolved_content: { by_type: {}, samples: [], samples_complete: true } } as Coverage
@@ -354,7 +409,7 @@ export async function findChats(runtime: Runtime, args: any, signal?: AbortSigna
   limit = args.limit ?? 10
   const queryFreshness = await verifiedFreshness(runtime, fresh, signal)
   const scope = xScope(args, conn.accountId)
-  const initialState = { items: filtered, index: Math.min(limit, filtered.length), limit, scope, freshness: queryFreshness }
+  const initialState = { tool: 'find_chats', items: filtered, index: Math.min(limit, filtered.length), limit, scope, freshness: queryFreshness }
   const initialToken = cursors.start(initialState, versionKey(fresh))
   const first = await cursors.advance<any, any>(initialToken, versionKey(fresh), async s => ({ state: s, hasMore: s.index < s.items.length, value: { items: s.items.slice(0, limit), index: limit, total: s.items.length, scope, freshness: queryFreshness } }))
   filtered = first.value.items
@@ -514,6 +569,7 @@ export async function getChatOverview(runtime: Runtime, args: any, signal?: Abor
   if (state) { state.filters.maxChars = args.max_chars ?? 12000; state.filters.bucketOffset = 0 }
   const token = args.cursor || cursors.start(state!, version)
   const page = await cursors.advance<ScanState, any>(token, version, async s => {
+    if (s.tool !== 'get_chat_overview') throw fail('INVALID_ARGUMENT', '请使用创建该游标的同一工具续读。')
     const p = await scanOverview(runtime, conn, s, signal)
     const queryFreshness = await verifiedFreshness(runtime, freshness, signal)
     const groups = new Map<string, any>()
@@ -567,6 +623,7 @@ export async function getMessageContext(runtime: Runtime, args: any, signal?: Ab
   const version = versionKey(fresh)
   if (args.cursor) {
     const page = await cursors.advance<any, any>(args.cursor, version, async state => {
+      if (state.tool === 'get_group_members') throw fail('INVALID_ARGUMENT', '请使用 get_group_members 续读群成员。')
       if (!!state.presentation !== !!present) throw fail('INVALID_ARGUMENT', '请使用创建该游标的同一上下文工具续读。')
       if (state.replyScans?.length && !state.replyComplete) await scanReplyRange(runtime, conn, state, signal)
       const fitted = pushWithinBudget([], state.remaining, state.maxChars)

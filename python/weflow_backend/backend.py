@@ -24,6 +24,7 @@ from wxtext.state import StateStore, atomic_write
 from wxtext.wal import apply_wal
 from wxtext.windows import WindowsSource, discover_data_dir_records
 from .live import connect as live_connect, data_version as live_data_version, close_all as close_live
+from .group_members import group_nicknames
 
 
 def account_root(value=None, account_id=None):
@@ -1090,6 +1091,56 @@ class Backend:
             result[username] = value
         return {"success": True, "map": result}
 
+    @live_query
+    def getGroupMemberCapabilities(self, **_):
+        connection = self.connection(self.resolve_db("contact"))
+        required = {"chat_room": {"id", "username", "ext_buffer"},
+                    "chatroom_member": {"room_id", "member_id"}, "name2id": {"username"}}
+        with self._transaction(connection):
+            available = tables(connection)
+            supported = all(name in available and names <= columns(connection, available[name])
+                            for name, names in required.items())
+        return {"success": True, "complete_group_members": supported}
+
+    @live_query
+    def getGroupMembers(self, chatroomId, **_):
+        if not isinstance(chatroomId, str) or not chatroomId.endswith("@chatroom"):
+            raise ToolError("INVALID_ARGUMENT", "请选择一个群聊。")
+        if not self.getGroupMemberCapabilities()["complete_group_members"]:
+            raise ToolError("FEATURE_UNAVAILABLE", "当前数据库没有可读取的群成员名单。",
+                            "请使用包含 contact.db 群成员资料的账号或快照。")
+        connection = self.connection(self.resolve_db("contact"))
+        with self._transaction(connection):
+            room = connection.execute("SELECT id, ext_buffer FROM chat_room WHERE username=?", (chatroomId,)).fetchone()
+            if room is None:
+                raise ToolError("GROUP_NOT_FOUND", "当前数据库没有这个群的成员资料。")
+            rows = connection.execute("""SELECT m.member_id, n.username FROM chatroom_member m
+                LEFT JOIN name2id n ON n.rowid=m.member_id WHERE m.room_id=? ORDER BY m.member_id""", (room["id"],)).fetchall()
+            if not rows or any(not row["username"] for row in rows):
+                raise ToolError("GROUP_MEMBERS_UNAVAILABLE", "当前群成员名单为空或不完整，无法确认全体成员。",
+                                "请先在微信打开群成员列表，待本机资料更新后重试；快照模式需更新快照。")
+            nicknames = group_nicknames(room["ext_buffer"])
+            profiles = {}
+            available = tables(connection)
+            # Non-friends may have profiles only in stranger.
+            for name in ("stranger", "contact"):
+                if name not in available:
+                    continue
+                for row in connection.execute(f"""SELECT username, nick_name, remark FROM {quoted(available[name])}
+                    WHERE username IN (SELECT n.username FROM chatroom_member m
+                    JOIN name2id n ON n.rowid=m.member_id WHERE m.room_id=?)""", (room["id"],)):
+                    profiles[row["username"]] = dict(row)
+        members = []
+        for row in rows:
+            self._check_limits()
+            username = row["username"]
+            profile = profiles.get(username, {})
+            nickname = nicknames.get(username)
+            members.append({"username": username, "nickname": profile.get("nick_name") or "",
+                            "remark": profile.get("remark") or "", "groupNickname": nickname,
+                            "groupNicknameState": "unknown" if nickname is None else "set" if nickname.strip() else "not_set"})
+        return {"success": True, "members": members, "source": "contact.chatroom_member"}
+
     def listMessageDbs(self, **_):
         return {"success": True, "data": [str(self.root / name) for name in self.meta["files"]
                 if re.fullmatch(r"message/message_\d+\.db", name)]}
@@ -1467,7 +1518,8 @@ class Backend:
                   "execQuery", "getContact", "getContactsCompact", "listMessageDbs", "listMediaDbs", "getSessions",
                   "getMessages", "openMessageCursor", "fetchMessageBatch", "closeMessageCursor",
                   "openPreparedData", "getPreparedSelection", "getMessageByLocator", "openMessageCursorAround", "getCachedImageKeys",
-                  "getSessionMessageTypeStats", "searchMessages", "setMonitor", "cancel"}
+                  "getSessionMessageTypeStats", "searchMessages", "setMonitor", "cancel",
+                  "getGroupMemberCapabilities", "getGroupMembers"}
         if method in simple:
             return getattr(self, method)(**payload)
         if method == "isConnected":
@@ -1548,7 +1600,7 @@ class Backend:
             return {"success": True, "counts": {"former_friend": 0, "blocked": 0, **counts}}
         if method == "getContactStatus":
             return {"success": True, "map": {r["username"]: {"localType": r["local_type"], "isFriend": r["local_type"] == 1} for r in self.contact_rows(payload["usernames"])}}
-        if method in {"getGroupMembers", "getGroupMemberCount", "getGroupMemberCounts", "getGroupNicknames"}:
+        if method in {"getGroupMemberCount", "getGroupMemberCounts", "getGroupNicknames"}:
             # Chat participants do not establish the group's complete membership.
             raise ToolError("FEATURE_UNAVAILABLE", "当前副本不提供群成员名单；群聊消息和发言统计仍可读取。")
         if method in {"getHeadImageBuffers", "getEmoticonCaptionStrict", "getEmoticonCaption", "getEmoticonCdnUrl"}:

@@ -13,7 +13,7 @@ from weflow_backend.backend import Backend, account_root
 from wxtext.errors import ToolError
 from wxtext.state import StateStore
 from wxtext.windows import parse_config_paths
-from fixtures import FakeWindows, make_account, install_snapshot, encrypted_account, encrypt_fixture
+from fixtures import FakeWindows, make_account, make_group_members, install_snapshot, encrypted_account, encrypt_fixture
 from wxtext.adapter import message_table
 from wxtext.cipher import decrypt_database, verify_database_integrity
 
@@ -124,6 +124,40 @@ class QueryTests(unittest.TestCase):
         self.assertEqual(caught.exception.code, 'ACCOUNT_REQUIRED')
         with self.assertRaises(ToolError):
             self.backend.exportRaw({'account': {'accountDir': str(self.root.parent)}, 'outputDir': str(self.root / 'export'), 'sessionIds': []})
+
+    def test_group_members_include_silent_members_and_explicit_nickname_states(self):
+        self.backend.close()
+        make_group_members(self.root)
+        meta = install_snapshot(self.backend, self.root)
+        self.backend.open(str(self.root.parent))
+        self.assertTrue(self.backend.dispatch('getGroupMemberCapabilities', {})['complete_group_members'])
+        members = self.backend.dispatch('getGroupMembers', {'chatroomId': '123@chatroom'})['members']
+        self.assertEqual([member['groupNicknameState'] for member in members], ['not_set', 'set', 'set', 'unknown'])
+        self.assertEqual(members[1]['nickname'], '朋友')
+        self.assertEqual(members[1]['groupNickname'], '朋友')  # Explicitly set to the same nickname.
+        self.assertEqual(members[1]['remark'], '老朋友')
+        self.assertEqual(members[2]['nickname'], '安静同学')  # No messages and not a friend.
+        self.assertIsNone(members[3]['groupNickname'])
+        with self.assertRaises(ToolError) as caught:
+            self.backend.getGroupMembers('wxid_peer')
+        self.assertEqual(caught.exception.code, 'INVALID_ARGUMENT')
+        with self.assertRaises(ToolError) as caught:
+            self.backend.getGroupMembers('missing@chatroom')
+        self.assertEqual(caught.exception.code, 'GROUP_NOT_FOUND')
+        self.backend.close()
+        with sqlite3.connect(Path(meta['directory']) / 'contact/contact.db') as connection:
+            connection.execute('UPDATE chat_room SET ext_buffer=?', (b'\x0a\xff',))
+        connection.close()
+        self.backend.open(str(self.root.parent))
+        self.assertTrue(all(member['groupNicknameState'] == 'unknown' for member in self.backend.getGroupMembers('123@chatroom')['members']))
+        self.backend.close()
+        with sqlite3.connect(Path(meta['directory']) / 'contact/contact.db') as connection:
+            connection.execute('DELETE FROM name2id WHERE username=?', ('wxid_quiet',))
+        connection.close()
+        self.backend.open(str(self.root.parent))
+        with self.assertRaises(ToolError) as caught:
+            self.backend.getGroupMembers('123@chatroom')
+        self.assertEqual(caught.exception.code, 'GROUP_MEMBERS_UNAVAILABLE')
 
     def test_persistent_stdio_protocol(self):
         requests = [dict(id=1, method='open', payload={'accountDir': str(self.root.parent)}),

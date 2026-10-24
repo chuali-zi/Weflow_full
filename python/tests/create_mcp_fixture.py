@@ -8,7 +8,7 @@ import sys
 import time
 import uuid
 
-from fixtures import make_account, install_snapshot, encrypt_fixture
+from fixtures import make_account, make_group_members, install_snapshot, encrypt_fixture
 from weflow_backend.backend import Backend
 from wxtext.cipher import DatabaseKey
 from wxtext.errors import ToolError
@@ -22,6 +22,7 @@ def generate(destination, mode="snapshot"):
     home = Path(destination).resolve() / uuid.uuid4().hex
     home.mkdir(parents=True)
     root, _ = make_account(home)
+    make_group_members(root)
     profile = home / "profile"
     profile.mkdir()
     (profile / "WeFlow-config.json").write_text("{}", encoding="utf-8")

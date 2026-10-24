@@ -74,6 +74,27 @@ def make_account(home):
     return root, long_text
 
 
+def make_group_members(root):
+    def text(field, value):
+        data = value.encode("utf-8")
+        assert len(data) < 128
+        return bytes([field << 3 | 2, len(data)]) + data
+
+    records = b"".join(bytes([10, len(member)]) + member for member in [
+        text(1, "wxid_me"), text(1, "wxid_peer") + text(2, "朋友"),
+        text(1, "wxid_quiet") + text(2, "2026001 张同学")])
+    with sqlite3.connect(root / "contact/contact.db") as connection:
+        connection.executescript("""CREATE TABLE name2id(username TEXT PRIMARY KEY);
+            CREATE TABLE chat_room(id INTEGER PRIMARY KEY, username TEXT, ext_buffer BLOB);
+            CREATE TABLE chatroom_member(room_id INTEGER, member_id INTEGER);
+            CREATE TABLE stranger(username TEXT PRIMARY KEY, nick_name TEXT, remark TEXT);
+            INSERT INTO name2id(rowid,username) VALUES(11,'wxid_me'),(23,'wxid_peer'),(45,'wxid_quiet'),(67,'wxid_missing');
+            INSERT INTO chatroom_member VALUES(99,11),(99,23),(99,45),(99,67);
+            INSERT INTO stranger VALUES('wxid_quiet','安静同学','');""")
+        connection.execute("INSERT INTO chat_room VALUES(?,?,?)", (99, "123@chatroom", records))
+    connection.close()
+
+
 def install_snapshot(backend, root):
     import shutil
     home = backend.active_path(root).parent
